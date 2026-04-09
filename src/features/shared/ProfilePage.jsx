@@ -18,6 +18,10 @@ const copy = {
   admin: {
     title: "Admin profile",
     subtitle: "Keep the clinic admin identity and contact details current for demos and handoff."
+  },
+  lab: {
+    title: "Lab technician profile",
+    subtitle: "Keep the lab operator identity and contact details current for the shared reporting workflow."
   }
 };
 
@@ -48,6 +52,14 @@ function buildForm(role, profile, user) {
       licenseNumber: profile.licenseNumber || "",
       bio: profile.bio || "",
       gender: profile.gender || ""
+    };
+  }
+
+  if (role === "lab") {
+    return {
+      fullName: profile.fullName || "",
+      phone: user.phone || "",
+      email: user.email || ""
     };
   }
 

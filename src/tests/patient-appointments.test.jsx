@@ -42,9 +42,9 @@ test("patient can cancel a non-completed appointment and the slot becomes bookab
   expect(await screen.findByText("Appointment cancelled")).toBeInTheDocument();
   const rebookLink = screen
     .getAllByRole("link", { name: /book another appointment/i })
-    .find((element) => element.getAttribute("href") === "/patient/booking");
+    .find((element) => element.getAttribute("href")?.startsWith("/patient/booking"));
   await user.click(rebookLink);
 
-  expect(await screen.findByText("Book by live doctor slots")).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: /book by live doctor slots/i, level: 1 })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: /9:15.*9:30/i })).not.toBeDisabled();
 });

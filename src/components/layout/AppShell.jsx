@@ -5,6 +5,7 @@ import {
   ClipboardList,
   LayoutDashboard,
   Languages,
+  Microscope,
   ShieldCheck,
   Sparkles,
   User2
@@ -21,6 +22,7 @@ function getNavLinks(role) {
       { to: "/patient", label: "Home", icon: Activity },
       { to: "/patient/appointments", label: "Appointments", icon: ClipboardList },
       { to: "/patient/booking", label: "Booking", icon: CalendarClock },
+      { to: "/patient/lab-reports", label: "Lab Reports", icon: Microscope },
       { to: "/patient/prescriptions", label: "Prescriptions", icon: ShieldCheck },
       { to: "/patient/profile", label: "Profile", icon: User2 }
     ];
@@ -44,6 +46,14 @@ function getNavLinks(role) {
     ];
   }
 
+  if (role === "lab") {
+    return [
+      { to: "/lab", label: "Dashboard", icon: LayoutDashboard },
+      { to: "/lab/orders", label: "Orders", icon: Microscope },
+      { to: "/lab/profile", label: "Profile", icon: User2 }
+    ];
+  }
+
   return [{ to: "/auth", label: "Auth", icon: Sparkles }];
 }
 
@@ -61,7 +71,7 @@ export function AppShell({ title, subtitle, actions, children, languageLabel = "
               <Sparkles className="h-5 w-5" />
             </div>
             <div>
-              <div className="text-sm font-semibold uppercase tracking-[0.24em] text-brand-tide">NIRA MVP</div>
+              <div className="text-sm font-semibold uppercase tracking-[0.24em] text-brand-tide">NIRA</div>
               <div className="text-lg font-semibold tracking-tight text-ink">
                 Networked Intelligence for Real-time Ambulatory Care
               </div>

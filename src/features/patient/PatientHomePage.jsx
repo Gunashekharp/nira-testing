@@ -5,6 +5,7 @@ import {
   CalendarClock,
   ClipboardList,
   FileText,
+  Microscope,
   ShieldCheck,
   UserRound
 } from "lucide-react";
@@ -30,6 +31,7 @@ const copy = {
     appointments: "All appointments",
     book: "Book appointment",
     prescriptions: "Prescriptions",
+    labReports: "Lab reports",
     profile: "Profile",
     profileCompleteness: "Profile completeness",
     recentRx: "Recent prescriptions",
@@ -49,6 +51,7 @@ const copy = {
     appointments: "All appointments",
     book: "Book appointment",
     prescriptions: "Prescriptions",
+    labReports: "Lab reports",
     profile: "Profile",
     profileCompleteness: "Profile completeness",
     recentRx: "Recent prescriptions",
@@ -90,6 +93,33 @@ const bucketCards = [
   }
 ];
 
+const labSummaryCards = [
+  {
+    label: "Total lab tests",
+    countKey: "total",
+    description: "Every active or completed test request in one place.",
+    to: "/patient/lab-reports?bucket=total"
+  },
+  {
+    label: "Yet to visit",
+    countKey: "yetToVisit",
+    description: "Tests requested by the doctor that still need your sample visit.",
+    to: "/patient/lab-reports?bucket=yet_to_visit"
+  },
+  {
+    label: "Sample given",
+    countKey: "sampleGiven",
+    description: "Samples already shared and moving through the lab workflow.",
+    to: "/patient/lab-reports?bucket=sample_given"
+  },
+  {
+    label: "Completed",
+    countKey: "completed",
+    description: "Reports published and ready to open or download.",
+    to: "/patient/lab-reports?bucket=completed"
+  }
+];
+
 export function PatientHomePage() {
   const { state } = useDemoData();
   const {
@@ -97,6 +127,8 @@ export function PatientHomePage() {
     appointmentsByBucket,
     bucketCounts,
     prescriptions,
+    labOrders,
+    labCounts,
     nextRecommendedAction
   } = getPatientWorkspace(state);
   const [language, setLanguage] = usePatientLanguage(patient?.preferredLanguage || "en");
@@ -191,10 +223,22 @@ export function PatientHomePage() {
                 <div className="mt-3 text-3xl font-semibold tracking-tight text-ink">{bucketCounts.completed}</div>
                 <div className="mt-2 text-sm text-muted">Completed visits with approved outputs ready to open.</div>
               </div>
+              {labSummaryCards.map((item) => (
+                <Link key={item.label} to={item.to}>
+                  <div className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:bg-white hover:shadow-soft">
+                    <div className="section-title">{item.label}</div>
+                    <div className="mt-3 text-3xl font-semibold tracking-tight text-ink">{labCounts[item.countKey]}</div>
+                    <div className="mt-2 text-sm text-muted">{item.description}</div>
+                  </div>
+                </Link>
+              ))}
             </div>
             <div className="mt-5 flex flex-wrap gap-3">
               <Button asChild variant="secondary">
                 <Link to="/patient/prescriptions">{content.prescriptions}</Link>
+              </Button>
+              <Button asChild variant="secondary">
+                <Link to="/patient/lab-reports">{content.labReports}</Link>
               </Button>
               <Button asChild variant="secondary">
                 <Link to="/patient/profile">{content.profile}</Link>
@@ -269,7 +313,7 @@ export function PatientHomePage() {
             <CardHeader
               eyebrow={content.recentRx}
               title="Shared outputs"
-              description="Approved prescriptions stay grouped here and in the completed appointment bucket."
+              description="Approved prescriptions stay grouped here, while lab reports appear in their own patient report center."
             />
             <div className="space-y-3">
               {prescriptions.slice(0, 3).map((prescription) => (
@@ -293,6 +337,35 @@ export function PatientHomePage() {
             </div>
           </Card>
         </div>
+
+        <Card>
+          <CardHeader
+            eyebrow={content.labReports}
+            title="Recent lab updates"
+            description="Track doctor-requested tests from yet to visit through report ready without leaving the patient dashboard."
+          />
+          <div className="grid gap-4 lg:grid-cols-3">
+            {labOrders.filter((order) => order.status !== "cancelled").slice(0, 3).map((order) => (
+              <Link key={order.id} to={`/patient/lab-reports/${order.id}`}>
+                <div className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:shadow-soft">
+                  <div className="flex items-center justify-between gap-3">
+                    <Microscope className="h-5 w-5 text-brand-tide" />
+                    <Badge tone={order.tone}>
+                      {order.patientStatusLabel}
+                    </Badge>
+                  </div>
+                  <div className="mt-4 text-base font-semibold text-ink">{order.tests.map((test) => test.name).join(", ")}</div>
+                  <div className="mt-2 text-sm text-muted">{order.doctor?.fullName}</div>
+                </div>
+              </Link>
+            ))}
+            {!labOrders.filter((order) => order.status !== "cancelled").length ? (
+              <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-5 text-sm text-muted lg:col-span-3">
+                Lab updates will appear here after the doctor sends a test order.
+              </div>
+            ) : null}
+          </div>
+        </Card>
 
         <Card>
           <CardHeader

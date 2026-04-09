@@ -8,6 +8,7 @@ import {
   ClipboardList,
   FileText,
   MessageSquareHeart,
+  Microscope,
   ShieldCheck
 } from "lucide-react";
 import { Badge } from "../../components/ui/Badge";
@@ -65,6 +66,27 @@ function buildTimeline(appointment) {
       current: appointment.bookingStatus === "completed"
     }
   ];
+}
+
+function LabProgressPipeline({ order }) {
+  return (
+    <div className="mt-4 grid gap-2 sm:grid-cols-4">
+      {order.progress.map((step) => (
+        <div
+          key={`${order.id}-${step.key}`}
+          className={`rounded-2xl border px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] ${
+            step.done
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : step.current
+                ? "border-cyan-200 bg-cyan-50 text-cyan-900"
+                : "border-line bg-white text-muted"
+          }`}
+        >
+          {step.label}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 export function PatientAppointmentDetailPanel({
@@ -204,9 +226,18 @@ export function PatientAppointmentDetailPanel({
             </Button>
           ) : null}
 
+          {!appointment.canStartInterview && !appointment.canViewPrescription && appointment.canViewLabReport ? (
+            <Button asChild>
+              <Link to={`/patient/lab-reports/${appointment.latestCompletedLabOrder.id}`}>
+                <Microscope className="h-4 w-4" />
+                View lab report
+              </Link>
+            </Button>
+          ) : null}
+
           {appointment.bookingStatus === "cancelled" ? (
             <Button asChild variant="accent">
-              <Link to="/patient/booking">
+              <Link to={`/patient/booking?doctorId=${appointment.doctorId}`}>
                 <CalendarClock className="h-4 w-4" />
                 Book another appointment
               </Link>
@@ -380,6 +411,47 @@ export function PatientAppointmentDetailPanel({
           )}
         </Card>
       </div>
+
+      <Card>
+        <CardHeader
+          eyebrow="Lab tests"
+          title={appointment.latestLabOrder ? appointment.latestLabOrder.patientStatusLabel : "No lab request yet"}
+          description="If the doctor requests tests, you will see whether the sample is still pending, already given, or fully completed."
+        />
+        {appointment.labOrders?.length ? (
+          <div className="space-y-4">
+            {appointment.labOrders.map((order) => (
+              <div key={order.id} className="rounded-[24px] border border-line bg-surface-2 p-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-base font-semibold text-ink">{order.tests.map((test) => test.name).join(", ")}</div>
+                    <div className="mt-2 text-sm text-muted">
+                      Requested on {formatDate(order.orderedAt)} | Status {order.patientStatusLabel}
+                    </div>
+                  </div>
+                  <Badge tone={order.tone}>{order.patientStatusLabel}</Badge>
+                </div>
+                {order.clinicianNote ? (
+                  <div className="mt-4 text-sm leading-6 text-muted">{order.clinicianNote}</div>
+                ) : null}
+                <LabProgressPipeline order={order} />
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <Button asChild variant="secondary">
+                    <Link to={`/patient/lab-reports/${order.id}`}>
+                      <Microscope className="h-4 w-4" />
+                      {order.report ? "Open report" : "Open request"}
+                    </Link>
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-5 text-sm text-muted">
+            No lab request has been created for this appointment yet.
+          </div>
+        )}
+      </Card>
     </div>
   );
 }

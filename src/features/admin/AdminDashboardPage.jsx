@@ -18,11 +18,12 @@ export function AdminDashboardPage() {
       languageLabel="Admin UI in English"
     >
       <div className="space-y-6">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <StatCard label="Doctors" value={`${counts.doctors}`} tone="accent" />
           <StatCard label="Pending approvals" value={`${counts.pendingDoctors}`} tone="soft" />
           <StatCard label="Patients" value={`${counts.patients}`} />
           <StatCard label="Appointments" value={`${counts.appointments}`} />
+          <StatCard label="Lab requests" value={`${counts.labOrders}`} />
         </div>
 
         <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
@@ -79,7 +80,7 @@ export function AdminDashboardPage() {
               </Link>
               <Link to="/admin/patients" className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:shadow-soft">
                 <div className="text-base font-semibold text-ink">Patients</div>
-                <div className="mt-2 text-sm leading-6 text-muted">Browse the read-only patient directory with optional profile fields.</div>
+                <div className="mt-2 text-sm leading-6 text-muted">Add, edit, archive, and restore patients with profile and lab context.</div>
               </Link>
             </div>
             <div className="mt-6 rounded-[24px] border border-line bg-surface-2 p-5 text-sm text-muted">
