@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { AlertTriangle, ArrowLeft, CheckCircle2, ClipboardCheck, Plus, Send, ShieldCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle2,
+  ClipboardCheck,
+  FileDown,
+  Microscope,
+  Plus,
+  Send,
+  ShieldCheck,
+  Sparkles,
+  XCircle
+} from "lucide-react";
 import { AppShell } from "../../components/layout/AppShell";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -9,8 +21,9 @@ import { Field, Input, Textarea } from "../../components/ui/FormFields";
 import { Modal } from "../../components/ui/Modal";
 import { useDemoData } from "../../app/DemoDataProvider";
 import { getAppointmentBundle, getDoctorWorkspace } from "../shared/selectors";
-import { formatConfidence, formatStatus, formatTime } from "../../lib/format";
+import { formatConfidence, formatDate, formatTime } from "../../lib/format";
 import { clone } from "../../lib/utils";
+import { formatMedicationTimings, getMedicationTimings, MEDICATION_TIMING_OPTIONS } from "../../services/medicationHelpers";
 
 function buildForm(bundle) {
   return {
@@ -29,7 +42,12 @@ function buildForm(bundle) {
     ),
     diagnoses: clone(bundle.draft?.diagnoses || [{ label: "Needs clinician confirmation", code: "R69", confidence: 0.5 }]),
     medicationSuggestions: clone(
-      bundle.draft?.medicationSuggestions || [{ name: "", dosage: "", frequency: "", duration: "", rationale: "" }]
+      (bundle.draft?.medicationSuggestions || [
+        { name: "", dosage: "", frequency: "", duration: "", rationale: "", timings: [] }
+      ]).map((item) => ({
+        ...item,
+        timings: getMedicationTimings(item)
+      }))
     )
   };
 }
@@ -74,6 +92,63 @@ function highlightClass(fieldName, editedFields) {
   return editedFields.includes(fieldName) ? "border-cyan-300 bg-brand-mint ring-2 ring-cyan-100" : "border-line bg-surface-2";
 }
 
+function getQueueBadge(status) {
+  if (status === "approved") return { tone: "success", label: "Completed today" };
+  if (status === "ai_ready") return { tone: "info", label: "AI chat completed" };
+  if (status === "in_consult") return { tone: "warning", label: "Under consultation" };
+  return { tone: "neutral", label: "Awaiting interview" };
+}
+
+function LabProgressPipeline({ progress }) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {progress.map((step) => (
+        <span
+          key={step.key}
+          className={`rounded-full border px-3 py-1 text-xs font-semibold ${
+            step.current
+              ? "border-cyan-200 bg-brand-mint text-brand-midnight"
+              : step.done
+                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                : "border-line bg-white text-muted"
+          }`}
+        >
+          {step.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function MedicationTimingSelector({ medicine, onToggle }) {
+  return (
+    <div className="space-y-3">
+      <div className="text-sm font-semibold text-ink">Tablet timing</div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        {MEDICATION_TIMING_OPTIONS.map((option) => {
+          const checked = (medicine.timings || []).includes(option.id);
+          return (
+            <label
+              key={option.id}
+              className={`flex items-center gap-3 rounded-2xl border px-4 py-3 text-sm transition ${
+                checked ? "border-cyan-300 bg-brand-mint text-brand-midnight" : "border-line bg-surface-2 text-ink"
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => onToggle(option.id)}
+                className="h-4 w-4 accent-slate-900"
+              />
+              <span className="font-medium">{option.label}</span>
+            </label>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function DoctorChartPage() {
   const { appointmentId } = useParams();
   const { state, actions } = useDemoData();
@@ -84,13 +159,26 @@ export function DoctorChartPage() {
   const [followUpNote, setFollowUpNote] = useState(bundle?.prescription?.followUpNote || "Review if symptoms persist after 5 days.");
   const [saving, setSaving] = useState(false);
   const [approving, setApproving] = useState(false);
+  const [sendingLab, setSendingLab] = useState(false);
+  const [cancellingLab, setCancellingLab] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+  const [aiModalOpen, setAiModalOpen] = useState(false);
   const [previewPrescription, setPreviewPrescription] = useState(bundle?.prescription || null);
+  const [selectedLabTestIds, setSelectedLabTestIds] = useState(() =>
+    bundle?.editableLabOrder?.selectedTestIds || bundle?.draft?.labSuggestions?.map((item) => item.testId) || []
+  );
+  const [labNote, setLabNote] = useState(bundle?.editableLabOrder?.clinicianNote || "");
+  const labCatalog = useMemo(() => state.labCatalog.allIds.map((id) => state.labCatalog.byId[id]), [state.labCatalog]);
   const draftContext = bundle?.draft || {
     confidenceMap: { subjective: 0.45, objective: 0.25, assessment: 0.3, plan: 0.25 },
     alerts: ["Interview has not been submitted yet. Approval should wait for more history."],
-    differentials: ["Insufficient pre-visit information"]
+    differentials: ["Insufficient pre-visit information"],
+    labSuggestions: []
   };
+
+  const activeLabOrder = bundle?.labOrders?.find((order) => ["ordered", "sample_received", "processing"].includes(order.status)) || null;
+  const editableLabOrder = activeLabOrder?.isEditable ? activeLabOrder : null;
+  const startedLabOrder = activeLabOrder && !activeLabOrder.isEditable ? activeLabOrder : null;
 
   useEffect(() => {
     if (bundle) {
@@ -98,8 +186,10 @@ export function DoctorChartPage() {
       setNote(bundle.review?.note || "");
       setFollowUpNote(bundle.prescription?.followUpNote || "Review if symptoms persist after 5 days.");
       setPreviewPrescription(bundle.prescription || null);
+      setSelectedLabTestIds(bundle.editableLabOrder?.selectedTestIds || bundle.draft?.labSuggestions?.map((item) => item.testId) || []);
+      setLabNote(bundle.editableLabOrder?.clinicianNote || "");
     }
-  }, [bundle?.appointment?.id, bundle?.review?.reviewedAt, bundle?.prescription?.issuedAt]);
+  }, [bundle?.appointment?.id, bundle?.review?.reviewedAt, bundle?.prescription?.issuedAt, bundle?.editableLabOrder?.id]);
 
   const editedFields = useMemo(() => {
     if (!bundle || !form) return [];
@@ -144,14 +234,39 @@ export function DoctorChartPage() {
     }));
   }
 
+  function toggleMedicationTiming(index, timingId) {
+    setForm((current) => ({
+      ...current,
+      medicationSuggestions: current.medicationSuggestions.map((medicine, medicineIndex) => {
+        if (medicineIndex !== index) {
+          return medicine;
+        }
+
+        const timings = medicine.timings || [];
+        return {
+          ...medicine,
+          timings: timings.includes(timingId)
+            ? timings.filter((item) => item !== timingId)
+            : [...timings, timingId]
+        };
+      })
+    }));
+  }
+
   function addMedication() {
     setForm((current) => ({
       ...current,
       medicationSuggestions: [
         ...current.medicationSuggestions,
-        { name: "", dosage: "", frequency: "", duration: "", rationale: "" }
+        { name: "", dosage: "", frequency: "", duration: "", rationale: "", timings: [] }
       ]
     }));
+  }
+
+  function toggleLabTest(testId) {
+    setSelectedLabTestIds((current) =>
+      current.includes(testId) ? current.filter((item) => item !== testId) : [...current, testId]
+    );
   }
 
   async function handleSave() {
@@ -179,44 +294,78 @@ export function DoctorChartPage() {
     setModalOpen(true);
   }
 
+  async function handleSubmitLabOrder() {
+    if (!selectedLabTestIds.length) {
+      return;
+    }
+
+    setSendingLab(true);
+
+    if (editableLabOrder) {
+      await actions.doctor.updateLabOrder(editableLabOrder.id, {
+        selectedTestIds: selectedLabTestIds,
+        clinicianNote: labNote
+      });
+    } else {
+      await actions.doctor.sendLabOrder(bundle.appointment.id, {
+        selectedTestIds: selectedLabTestIds,
+        clinicianNote: labNote
+      });
+    }
+
+    setSendingLab(false);
+  }
+
+  async function handleCancelLabOrder() {
+    if (!editableLabOrder) {
+      return;
+    }
+
+    setCancellingLab(true);
+    await actions.doctor.cancelLabOrder(editableLabOrder.id);
+    setCancellingLab(false);
+  }
+
   return (
     <AppShell
       title="Unified EMR validation"
       subtitle="Review the APCI draft, edit clinical sections inline, capture doctor notes, and approve a patient-facing prescription without leaving this single workspace."
       languageLabel="Doctor review in English"
     >
-      <div className="grid gap-6 xl:grid-cols-[0.74fr_1.28fr_0.78fr]">
+      <div className="grid gap-6 xl:grid-cols-[0.74fr_1.24fr_0.82fr]">
         <Card className="xl:sticky xl:top-24 xl:h-[calc(100vh-8rem)] xl:overflow-auto">
           <CardHeader
-            eyebrow="Today's queue"
+            eyebrow="Patients in queue"
             title="Consult navigation"
             description="Jump between queued patients while keeping the doctor workflow intact."
           />
           <div className="space-y-3">
-            {appointments.map((item) => (
-              <Link key={item.id} to={`/doctor/patient/${item.id}`}>
-                <div
-                  className={`rounded-[22px] border p-4 transition ${
-                    item.id === bundle.appointment.id ? "border-cyan-300 bg-brand-mint" : "border-line bg-surface-2 hover:bg-white"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-sm font-semibold text-ink">{item.patient?.fullName}</div>
-                      <div className="mt-1 text-xs text-muted">
-                        {formatTime(item.startAt)} · Token {item.token}
+            {appointments.map((item) => {
+              const badge = getQueueBadge(item.queueStatus);
+
+              return (
+                <Link key={item.id} to={`/doctor/patient/${item.id}`}>
+                  <div
+                    className={`rounded-[22px] border p-4 transition ${
+                      item.id === bundle.appointment.id ? "border-cyan-300 bg-brand-mint" : "border-line bg-surface-2 hover:bg-white"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-ink">{item.patient?.fullName}</div>
+                        <div className="mt-1 text-xs text-muted">
+                          {formatTime(item.startAt)} | Token {item.token}
+                        </div>
                       </div>
+                      <Badge tone={badge.tone}>{badge.label}</Badge>
                     </div>
-                    <Badge tone={item.queueStatus === "approved" ? "success" : item.queueStatus === "ai_ready" ? "info" : "warning"}>
-                      {formatStatus(item.queueStatus)}
-                    </Badge>
+                    <div className="mt-3 text-sm leading-6 text-muted">
+                      {item.draft?.soap?.chiefComplaint || "Interview still pending"}
+                    </div>
                   </div>
-                  <div className="mt-3 text-sm leading-6 text-muted">
-                    {item.draft?.soap?.chiefComplaint || "Interview still pending"}
-                  </div>
-                </div>
-              </Link>
-            ))}
+                </Link>
+              );
+            })}
           </div>
         </Card>
 
@@ -224,7 +373,7 @@ export function DoctorChartPage() {
           <CardHeader
             eyebrow="Encounter review"
             title={`${bundle.patient.fullName} · ${bundle.patient.age || "--"} yrs`}
-            description={`${bundle.doctor.fullName} · ${formatStatus(bundle.appointment.visitType)} · Token ${bundle.appointment.token}`}
+            description={`${bundle.doctor.fullName} | ${bundle.appointment.visitType} | Token ${bundle.appointment.token}`}
             actions={
               <Button asChild variant="secondary">
                 <Link to="/doctor">
@@ -301,7 +450,9 @@ export function DoctorChartPage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <div className="section-title">Prescription draft</div>
-                <div className="mt-2 text-sm text-muted">Edit the proposed medications before approval.</div>
+                <div className="mt-2 text-sm text-muted">
+                  Select exactly when the tablets should be taken so the patient sees clear morning, afternoon, night, and food timing instructions.
+                </div>
               </div>
               <Button variant="secondary" size="sm" onClick={addMedication}>
                 <Plus className="h-4 w-4" />
@@ -318,7 +469,17 @@ export function DoctorChartPage() {
                     <Input value={medicine.duration} onChange={(event) => updateMedication(index, "duration", event.target.value)} placeholder="Duration" />
                   </div>
                   <div className="mt-3">
-                    <Input value={medicine.rationale} onChange={(event) => updateMedication(index, "rationale", event.target.value)} placeholder="Instruction / rationale" />
+                    <Input
+                      value={medicine.rationale}
+                      onChange={(event) => updateMedication(index, "rationale", event.target.value)}
+                      placeholder="Instruction / rationale"
+                    />
+                  </div>
+                  <div className="mt-4">
+                    <MedicationTimingSelector medicine={medicine} onToggle={(timingId) => toggleMedicationTiming(index, timingId)} />
+                  </div>
+                  <div className="mt-3 text-sm text-muted">
+                    Patient view: <span className="font-semibold text-ink">{formatMedicationTimings(medicine)}</span>
                   </div>
                 </div>
               ))}
@@ -353,10 +514,163 @@ export function DoctorChartPage() {
 
         <Card className="space-y-5 xl:sticky xl:top-24 xl:h-[calc(100vh-8rem)] xl:overflow-auto">
           <CardHeader
-            eyebrow="Clinical side panel"
-            title="AI signals & safety"
-            description="A compact right rail for confidence, alerts, differentials, and future integration hooks."
+            eyebrow="Care side panel"
+            title="Lab workflow"
+            description="Suggested tests, request status, and completed reports now stay in the right rail. AI review stays available on demand."
+            actions={
+              <Button variant="secondary" size="sm" onClick={() => setAiModalOpen(true)}>
+                <Sparkles className="h-4 w-4" />
+                AI signals & safety
+              </Button>
+            }
           />
+
+          <div className="rounded-[24px] border border-line bg-surface-2 p-5">
+            <div className="section-title">Suggested tests</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {(draftContext.labSuggestions || []).length ? (
+                draftContext.labSuggestions.map((suggestion) => {
+                  const test = state.labCatalog.byId[suggestion.testId];
+                  return (
+                    <span key={`${suggestion.testId}-${suggestion.reason}`} className="pill">
+                      {test?.name || suggestion.testId}
+                    </span>
+                  );
+                })
+              ) : (
+                <span className="pill">No mock test suggestion on this draft yet</span>
+              )}
+            </div>
+          </div>
+
+          <div className="rounded-[24px] border border-line bg-surface-2 p-5">
+            <div className="section-title">{editableLabOrder ? "Edit lab request" : "Select tests"}</div>
+            <div className="mt-2 text-sm text-muted">
+              {editableLabOrder
+                ? "You can still update or cancel this request until sample collection begins."
+                : startedLabOrder
+                  ? "This request is already moving through the lab. The doctor view stays read-only until the report is ready."
+                  : "Mock APCI suggestions appear here, but the doctor still decides what should be sent."}
+            </div>
+
+            <div className="mt-5 grid gap-3">
+              {labCatalog.map((test) => {
+                const selected = selectedLabTestIds.includes(test.id);
+                const disabled = !!startedLabOrder;
+
+                return (
+                  <button
+                    key={test.id}
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => toggleLabTest(test.id)}
+                    className={`rounded-[22px] border p-4 text-left transition ${
+                      selected ? "border-cyan-300 bg-brand-mint" : "border-line bg-white hover:bg-surface-2"
+                    } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
+                  >
+                    <div className="text-sm font-semibold text-ink">{test.name}</div>
+                    <div className="mt-1 text-xs uppercase tracking-[0.18em] text-muted">{test.category}</div>
+                    <div className="mt-2 text-sm text-muted">
+                      {test.sampleType} | {test.turnaroundLabel}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="mt-5">
+              <Field label="Clinician note for lab">
+                <Textarea value={labNote} onChange={(event) => setLabNote(event.target.value)} disabled={!!startedLabOrder} />
+              </Field>
+            </div>
+
+            {selectedLabTestIds.length ? (
+              <div className="mt-5">
+                <div className="section-title">Selected tests</div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {selectedLabTestIds.map((testId) => (
+                    <span key={testId} className="pill">
+                      {state.labCatalog.byId[testId]?.name || testId}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            <div className="mt-5 flex flex-wrap gap-3">
+              {!startedLabOrder ? (
+                <Button onClick={handleSubmitLabOrder} disabled={!selectedLabTestIds.length || sendingLab}>
+                  <Microscope className="h-4 w-4" />
+                  {sendingLab ? "Saving..." : editableLabOrder ? "Update tests" : "Send to lab"}
+                </Button>
+              ) : null}
+              {editableLabOrder ? (
+                <Button variant="secondary" onClick={handleCancelLabOrder} disabled={cancellingLab}>
+                  <XCircle className="h-4 w-4" />
+                  {cancellingLab ? "Cancelling..." : "Cancel request"}
+                </Button>
+              ) : null}
+            </div>
+          </div>
+
+          {bundle.labOrders?.length ? (
+            <div className="space-y-3">
+              <div className="section-title">Existing lab requests</div>
+              {bundle.labOrders.map((order) => (
+                <div key={order.id} className="rounded-[22px] border border-line bg-white p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-ink">{order.tests.map((test) => test.name).join(", ")}</div>
+                      <div className="mt-1 text-sm text-muted">Requested {formatDate(order.orderedAt)}</div>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge tone={order.tone}>{order.doctorStatusLabel}</Badge>
+                      {order.report ? (
+                        <Button variant="secondary" size="sm" onClick={() => actions.documents.downloadLabReport(order.report.id)}>
+                          <FileDown className="h-4 w-4" />
+                          Download report
+                        </Button>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <LabProgressPipeline progress={order.progress} />
+                  </div>
+
+                  {order.clinicianNote ? <div className="mt-3 text-sm text-muted">{order.clinicianNote}</div> : null}
+
+                  {order.report ? (
+                    <div className="mt-4 space-y-3 rounded-2xl border border-line bg-surface-2 p-4">
+                      <div className="text-sm font-semibold text-ink">Completed report summary</div>
+                      <div className="text-sm text-muted">{order.report.summary}</div>
+                      <div className="grid gap-3">
+                        {order.report.resultItems.slice(0, 4).map((item) => (
+                          <div key={item.testId} className="rounded-2xl bg-white px-4 py-3 text-sm">
+                            <div className="font-semibold text-ink">{item.name}</div>
+                            <div className="mt-1 text-muted">
+                              {item.result} {item.unit || ""}
+                            </div>
+                            <div className="mt-1 text-xs uppercase tracking-[0.18em] text-muted">{item.flag}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </Card>
+      </div>
+
+      <Modal
+        open={aiModalOpen}
+        onClose={() => setAiModalOpen(false)}
+        title="AI signals & safety"
+        description="This stays mocked and local in the demo. It is available on demand so the right rail can stay focused on lab workflow."
+      >
+        <div className="space-y-5">
           <div className="rounded-[24px] border border-line bg-surface-2 p-5">
             <div className="section-title">Confidence map</div>
             <div className="mt-4 space-y-3">
@@ -426,8 +740,8 @@ export function DoctorChartPage() {
               ))}
             </div>
           </div>
-        </Card>
-      </div>
+        </div>
+      </Modal>
 
       <Modal
         open={modalOpen}
@@ -453,9 +767,10 @@ export function DoctorChartPage() {
                 <div key={`${previewPrescription.id}-${medicine.name}`} className="rounded-[22px] border border-line bg-surface-2 p-4">
                   <div className="text-base font-semibold text-ink">{medicine.name}</div>
                   <div className="mt-2 text-sm text-muted">
-                    {medicine.dosage} · {medicine.frequency} · {medicine.duration}
+                    {medicine.dosage} | {medicine.frequency} | {medicine.duration}
                   </div>
                   <div className="mt-2 text-sm text-ink">{medicine.instructions}</div>
+                  <div className="mt-2 text-sm text-muted">Tablet timing: {formatMedicationTimings(medicine)}</div>
                 </div>
               ))}
             </div>

@@ -11,6 +11,8 @@ import { BookingPage } from "../features/patient/BookingPage";
 import { InterviewPage } from "../features/patient/InterviewPage";
 import { PrescriptionsPage } from "../features/patient/PrescriptionsPage";
 import { PrescriptionDetailPage } from "../features/patient/PrescriptionDetailPage";
+import { PatientLabReportsPage } from "../features/patient/PatientLabReportsPage";
+import { PatientLabReportDetailPage } from "../features/patient/PatientLabReportDetailPage";
 import { ProfilePage } from "../features/shared/ProfilePage";
 import { DoctorDashboardPage } from "../features/doctor/DoctorDashboardPage";
 import { DoctorAvailabilityPage } from "../features/doctor/DoctorAvailabilityPage";
@@ -19,6 +21,8 @@ import { AdminDashboardPage } from "../features/admin/AdminDashboardPage";
 import { AdminDoctorsPage } from "../features/admin/AdminDoctorsPage";
 import { AdminPatientsPage } from "../features/admin/AdminPatientsPage";
 import { AdminAppointmentsPage } from "../features/admin/AdminAppointmentsPage";
+import { LabDashboardPage } from "../features/lab/LabDashboardPage";
+import { LabOrderPage } from "../features/lab/LabOrderPage";
 
 export default function App() {
   const { loading } = useDemoData();
@@ -50,6 +54,8 @@ export default function App() {
           <Route path="/patient/interview/:appointmentId" element={<InterviewPage />} />
           <Route path="/patient/prescriptions" element={<PrescriptionsPage />} />
           <Route path="/patient/prescriptions/:prescriptionId" element={<PrescriptionDetailPage />} />
+          <Route path="/patient/lab-reports" element={<PatientLabReportsPage />} />
+          <Route path="/patient/lab-reports/:labOrderId" element={<PatientLabReportDetailPage />} />
           <Route path="/patient/profile" element={<ProfilePage />} />
         </Route>
 
@@ -68,6 +74,13 @@ export default function App() {
           <Route path="/admin/patients" element={<AdminPatientsPage />} />
           <Route path="/admin/appointments" element={<AdminAppointmentsPage />} />
           <Route path="/admin/profile" element={<ProfilePage />} />
+        </Route>
+
+        <Route element={<RoleRoute role="lab" />}>
+          <Route path="/lab" element={<LabDashboardPage />} />
+          <Route path="/lab/orders" element={<LabDashboardPage />} />
+          <Route path="/lab/orders/:labOrderId" element={<LabOrderPage />} />
+          <Route path="/lab/profile" element={<ProfilePage />} />
         </Route>
       </Route>
 

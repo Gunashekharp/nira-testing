@@ -12,7 +12,7 @@ import {
   upsertEntity
 } from "./stateHelpers";
 
-const STORAGE_KEY = "nira-demo-state-v2";
+const STORAGE_KEY = "nira-demo-state-v5";
 
 function readRaw() {
   if (typeof window === "undefined") {
@@ -167,6 +167,17 @@ function createAdminProfile(user, form) {
   };
 }
 
+function createLabTechnicianProfile(user, form) {
+  return {
+    id: user.profileId,
+    userId: user.id,
+    fullName: form.fullName,
+    phone: form.phone || "",
+    email: form.email || "",
+    status: form.status || "active"
+  };
+}
+
 function createScheduleTemplate(doctorId, slotDurationMinutes = 15, weeklyRules = createWeeklyRules()) {
   return {
     id: doctorId,
@@ -257,9 +268,42 @@ function createPendingEncounter(appointment, interview) {
     finalClinicalNote: "",
     alerts: draft.alerts,
     confidenceMap: draft.confidenceMap,
+    labSuggestions: draft.labSuggestions || [],
+    labOrderIds: [],
     prescriptionId: null,
     approvedAt: null
   };
+}
+
+function getUserForProfile(state, role, profileId) {
+  return listCollection(state.users).find((user) => user.role === role && user.profileId === profileId) || null;
+}
+
+function getDefaultLabUserId(state) {
+  const firstLabProfileId = state.labs.allIds[0];
+  if (!firstLabProfileId) {
+    return null;
+  }
+
+  return state.labs.byId[firstLabProfileId].userId;
+}
+
+function ensureUniqueUserIdentity(state, role, form, excludeUserId = null) {
+  const normalizedPhone = normalizePhone(form.phone || "");
+  const normalizedEmail = (form.email || "").toLowerCase();
+  const duplicate = listCollection(state.users).find((user) => {
+    if (user.id === excludeUserId || user.role !== role) {
+      return false;
+    }
+
+    const phoneMatches = normalizedPhone && normalizePhone(user.phone) === normalizedPhone;
+    const emailMatches = normalizedEmail && user.email.toLowerCase() === normalizedEmail;
+    return phoneMatches || emailMatches;
+  });
+
+  if (duplicate) {
+    throw new Error(`A ${role} account already exists with that phone or email.`);
+  }
 }
 
 function syncDoctorAndMaybeOriginal(state, doctorIds) {
@@ -308,16 +352,7 @@ export const demoStore = {
   async signupPatient(form) {
     await wait(140);
     return updateState((state) => {
-      const duplicate = listCollection(state.users).find(
-        (user) =>
-          user.role === "patient" &&
-          (normalizePhone(user.phone) === normalizePhone(form.phone) ||
-            (form.email && user.email.toLowerCase() === form.email.toLowerCase()))
-      );
-
-      if (duplicate) {
-        throw new Error("A patient account already exists with that phone or email.");
-      }
+      ensureUniqueUserIdentity(state, "patient", form);
 
       const profileId = uid("patient");
       const user = createUserAccount("patient", profileId, form, "active");
@@ -333,16 +368,7 @@ export const demoStore = {
   async signupDoctor(form) {
     await wait(160);
     return updateState((state) => {
-      const duplicate = listCollection(state.users).find(
-        (user) =>
-          user.role === "doctor" &&
-          (normalizePhone(user.phone) === normalizePhone(form.phone) ||
-            user.email.toLowerCase() === form.email.toLowerCase())
-      );
-
-      if (duplicate) {
-        throw new Error("A doctor account already exists with that phone or email.");
-      }
+      ensureUniqueUserIdentity(state, "doctor", form);
 
       const profileId = uid("doctor");
       const user = createUserAccount("doctor", profileId, form, "pending_approval");
@@ -367,6 +393,8 @@ export const demoStore = {
         throw new Error("Admin signup is disabled after the first clinic admin is created.");
       }
 
+      ensureUniqueUserIdentity(state, "admin", form);
+
       const profileId = uid("admin");
       const user = createUserAccount("admin", profileId, form, "active");
       const profile = createAdminProfile(user, form);
@@ -389,6 +417,18 @@ export const demoStore = {
       const collectionKey = getRoleCollectionKey(user.role);
       const profile = state[collectionKey].byId[user.profileId];
       const nextProfile = { ...profile, ...payload };
+
+      if (payload.phone !== undefined || payload.email !== undefined) {
+        ensureUniqueUserIdentity(
+          state,
+          user.role,
+          {
+            phone: payload.phone !== undefined ? payload.phone : user.phone,
+            email: payload.email !== undefined ? payload.email : user.email
+          },
+          user.id
+        );
+      }
 
       if (collectionKey === "patients" && payload.age === "") {
         nextProfile.age = null;
@@ -420,16 +460,7 @@ export const demoStore = {
   async addDoctor(form) {
     await wait(140);
     return updateState((state) => {
-      const duplicate = listCollection(state.users).find(
-        (user) =>
-          user.role === "doctor" &&
-          (normalizePhone(user.phone) === normalizePhone(form.phone) ||
-            user.email.toLowerCase() === form.email.toLowerCase())
-      );
-
-      if (duplicate) {
-        throw new Error("A doctor account already exists with that phone or email.");
-      }
+      ensureUniqueUserIdentity(state, "doctor", form);
 
       const profileId = uid("doctor");
       const status = form.status || "active";
@@ -447,6 +478,91 @@ export const demoStore = {
     });
   },
 
+  async addPatient(form) {
+    await wait(140);
+    return updateState((state) => {
+      ensureUniqueUserIdentity(state, "patient", form);
+
+      const profileId = uid("patient");
+      const patientForm = {
+        preferredLanguage: "en",
+        password: form.password || "Patient@123",
+        ...form
+      };
+      const user = createUserAccount("patient", profileId, patientForm, "active");
+      const profile = createPatientProfile(user, patientForm);
+
+      upsertEntity(state.users, user);
+      upsertEntity(state.patients, profile);
+      return state;
+    });
+  },
+
+  async updatePatient(patientId, payload) {
+    await wait();
+    return updateState((state) => {
+      const patient = state.patients.byId[patientId];
+      if (!patient) {
+        throw new Error("Patient not found.");
+      }
+
+      const user = state.users.byId[patient.userId];
+      ensureUniqueUserIdentity(
+        state,
+        "patient",
+        {
+          phone: payload.phone !== undefined ? payload.phone : user.phone,
+          email: payload.email !== undefined ? payload.email : user.email
+        },
+        user.id
+      );
+
+      state.patients.byId[patientId] = {
+        ...patient,
+        ...payload,
+        age: payload.age === "" ? null : payload.age !== undefined ? Number(payload.age) || null : patient.age
+      };
+      state.users.byId[user.id] = {
+        ...user,
+        phone: payload.phone !== undefined ? payload.phone : user.phone,
+        email: payload.email !== undefined ? payload.email : user.email
+      };
+      return state;
+    });
+  },
+
+  async archivePatient(patientId) {
+    await wait();
+    return updateState((state) => {
+      const patient = state.patients.byId[patientId];
+      if (!patient) {
+        throw new Error("Patient not found.");
+      }
+
+      state.users.byId[patient.userId] = {
+        ...state.users.byId[patient.userId],
+        status: "archived"
+      };
+      return state;
+    });
+  },
+
+  async restorePatient(patientId) {
+    await wait();
+    return updateState((state) => {
+      const patient = state.patients.byId[patientId];
+      if (!patient) {
+        throw new Error("Patient not found.");
+      }
+
+      state.users.byId[patient.userId] = {
+        ...state.users.byId[patient.userId],
+        status: "active"
+      };
+      return state;
+    });
+  },
+
   async updateDoctor(doctorId, payload) {
     await wait();
     return updateState((state) => {
@@ -456,6 +572,15 @@ export const demoStore = {
       }
 
       const user = state.users.byId[doctor.userId];
+      ensureUniqueUserIdentity(
+        state,
+        "doctor",
+        {
+          phone: payload.phone !== undefined ? payload.phone : user.phone,
+          email: payload.email !== undefined ? payload.email : user.email
+        },
+        user.id
+      );
       state.doctors.byId[doctorId] = { ...doctor, ...payload };
       state.users.byId[user.id] = {
         ...user,
@@ -613,6 +738,180 @@ export const demoStore = {
     });
   },
 
+  async sendLabOrder(appointmentId, payload) {
+    await wait(160);
+    return updateState((state) => {
+      const appointment = state.appointments.byId[appointmentId];
+      const encounter = state.encounters.byId[`encounter-${appointmentId}`];
+      if (!appointment || !encounter) {
+        throw new Error("Encounter not found.");
+      }
+
+      if (!payload.selectedTestIds?.length) {
+        throw new Error("Choose at least one lab test before sending the order.");
+      }
+
+      const labOrderId = uid("laborder");
+      upsertEntity(state.labOrders, {
+        id: labOrderId,
+        appointmentId,
+        patientId: appointment.patientId,
+        doctorId: appointment.doctorId,
+        createdByUserId: state.session.userId,
+        assignedLabUserId: getDefaultLabUserId(state),
+        status: "ordered",
+        selectedTestIds: payload.selectedTestIds,
+        clinicianNote: payload.clinicianNote || "",
+        orderedAt: new Date().toISOString(),
+        sampleReceivedAt: null,
+        processingStartedAt: null,
+        completedAt: null,
+        cancelledAt: null,
+        cancelledByUserId: null,
+        lastEditedAt: new Date().toISOString(),
+        reportId: null
+      });
+
+      state.encounters.byId[encounter.id] = {
+        ...encounter,
+        labOrderIds: [...(encounter.labOrderIds || []), labOrderId]
+      };
+
+      return state;
+    });
+  },
+
+  async updateLabOrder(labOrderId, payload) {
+    await wait();
+    return updateState((state) => {
+      const order = state.labOrders.byId[labOrderId];
+      if (!order) {
+        throw new Error("Lab order not found.");
+      }
+
+      if (order.status !== "ordered") {
+        throw new Error("Only requests that have not started yet can be edited.");
+      }
+
+      state.labOrders.byId[labOrderId] = {
+        ...order,
+        selectedTestIds: payload.selectedTestIds,
+        clinicianNote: payload.clinicianNote || "",
+        lastEditedAt: new Date().toISOString()
+      };
+      return state;
+    });
+  },
+
+  async cancelLabOrder(labOrderId) {
+    await wait();
+    return updateState((state) => {
+      const order = state.labOrders.byId[labOrderId];
+      if (!order) {
+        throw new Error("Lab order not found.");
+      }
+
+      if (order.status !== "ordered") {
+        throw new Error("Only requests that have not started yet can be cancelled.");
+      }
+
+      state.labOrders.byId[labOrderId] = {
+        ...order,
+        status: "cancelled",
+        cancelledAt: new Date().toISOString(),
+        cancelledByUserId: state.session.userId,
+        lastEditedAt: new Date().toISOString()
+      };
+      return state;
+    });
+  },
+
+  async markSampleReceived(labOrderId) {
+    await wait();
+    return updateState((state) => {
+      const order = state.labOrders.byId[labOrderId];
+      if (!order) {
+        throw new Error("Lab order not found.");
+      }
+
+      if (order.status !== "ordered") {
+        throw new Error("Sample can only be marked after a requested test.");
+      }
+
+      state.labOrders.byId[labOrderId] = {
+        ...order,
+        status: "sample_received",
+        assignedLabUserId: state.session.userId || order.assignedLabUserId,
+        sampleReceivedAt: new Date().toISOString()
+      };
+      return state;
+    });
+  },
+
+  async startLabOrder(labOrderId) {
+    await wait();
+    return updateState((state) => {
+      const order = state.labOrders.byId[labOrderId];
+      if (!order) {
+        throw new Error("Lab order not found.");
+      }
+
+      if (!["sample_received", "ordered"].includes(order.status)) {
+        throw new Error("Processing can only start after the request reaches the lab.");
+      }
+
+      state.labOrders.byId[labOrderId] = {
+        ...order,
+        status: "processing",
+        assignedLabUserId: state.session.userId || order.assignedLabUserId,
+        sampleReceivedAt: order.sampleReceivedAt || new Date().toISOString(),
+        processingStartedAt: order.processingStartedAt || new Date().toISOString()
+      };
+      return state;
+    });
+  },
+
+  async completeLabOrder(labOrderId, payload) {
+    await wait(180);
+    return updateState((state) => {
+      const order = state.labOrders.byId[labOrderId];
+      if (!order) {
+        throw new Error("Lab order not found.");
+      }
+
+      if (!["sample_received", "processing"].includes(order.status)) {
+        throw new Error("Only received or processing requests can be completed.");
+      }
+
+      const completedAt = new Date().toISOString();
+      const reportId = order.reportId || uid("labreport");
+      upsertEntity(state.labReports, {
+        id: reportId,
+        labOrderId,
+        patientId: order.patientId,
+        doctorId: order.doctorId,
+        resultItems: payload.resultItems,
+        summary: payload.summary || "",
+        completedByUserId: state.session.userId,
+        completedAt,
+        downloadMeta: {
+          fileName: `nira-lab-report-${labOrderId}.pdf`
+        }
+      });
+
+      state.labOrders.byId[labOrderId] = {
+        ...order,
+        status: "completed",
+        assignedLabUserId: state.session.userId || order.assignedLabUserId,
+        sampleReceivedAt: order.sampleReceivedAt || completedAt,
+        processingStartedAt: order.processingStartedAt || completedAt,
+        completedAt,
+        reportId
+      };
+      return state;
+    });
+  },
+
   async bookAppointment(payload) {
     await wait(160);
     return updateState((state) => {
@@ -750,7 +1049,8 @@ export const demoStore = {
         status: "ai_ready",
         apciDraft: draft,
         alerts: draft.alerts,
-        confidenceMap: draft.confidenceMap
+        confidenceMap: draft.confidenceMap,
+        labSuggestions: draft.labSuggestions || []
       };
       state.ui.lastViewedAppointmentId = appointmentId;
       return state;
@@ -806,6 +1106,7 @@ export const demoStore = {
         apciDraft: payload.draft,
         alerts: payload.draft.alerts,
         confidenceMap: payload.draft.confidenceMap,
+        labSuggestions: payload.draft.labSuggestions || encounter.labSuggestions || [],
         doctorReview: {
           draftId: payload.draft.id,
           editedFields: payload.editedFields,

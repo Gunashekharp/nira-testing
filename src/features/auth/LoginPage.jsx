@@ -19,6 +19,10 @@ const roleCopy = {
   admin: {
     title: "Admin login",
     description: "Sign in to manage doctors, schedules, appointments, and clinic operations."
+  },
+  lab: {
+    title: "Lab technician login",
+    description: "Sign in to review requested tests, update sample and processing stages, and publish lab reports."
   }
 };
 
@@ -94,10 +98,10 @@ export function LoginPage() {
           <CardHeader
             eyebrow="Need an account?"
             title="Create or reset your demo entry"
-            description="Patient and doctor accounts can be created publicly. Admin signup is only shown when the clinic has no admin yet."
+            description="Patient and doctor accounts can be created publicly. Admin signup is only shown when the clinic has no admin yet, and lab access stays login-only in this pass."
           />
           <div className="space-y-4">
-            {role !== "admin" ? (
+            {role === "patient" || role === "doctor" ? (
               <div className="rounded-[24px] border border-line bg-surface-2 p-5">
                 <div className="text-base font-semibold text-ink">New {role} account</div>
                 <p className="mt-2 text-sm leading-6 text-muted">
@@ -109,9 +113,13 @@ export function LoginPage() {
                   </Button>
                 </div>
               </div>
-            ) : (
+            ) : role === "admin" ? (
               <div className="rounded-[24px] border border-line bg-surface-2 p-5 text-sm leading-6 text-muted">
                 Admin signup is only available during first clinic setup. Use the auth home screen demo utility if you want to simulate that state.
+              </div>
+            ) : (
+              <div className="rounded-[24px] border border-line bg-surface-2 p-5 text-sm leading-6 text-muted">
+                Lab technician accounts are seeded for the frontend demo and stay login-only until lab administration is added.
               </div>
             )}
           </div>

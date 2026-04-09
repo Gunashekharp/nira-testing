@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { CalendarClock, CheckCircle2, Stethoscope } from "lucide-react";
 import { AppShell } from "../../components/layout/AppShell";
 import { Badge } from "../../components/ui/Badge";
@@ -16,10 +16,14 @@ import { usePatientLanguage } from "./usePatientLanguage";
 export function BookingPage() {
   const { state, session, actions } = useDemoData();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { patient } = getPatientWorkspace(state);
   const [language, setLanguage] = usePatientLanguage(patient?.preferredLanguage || "en");
   const doctors = useMemo(() => getBookableDoctors(state), [state]);
-  const [selectedDoctorId, setSelectedDoctorId] = useState(doctors[0]?.id || "");
+  const requestedDoctorId = searchParams.get("doctorId");
+  const [selectedDoctorId, setSelectedDoctorId] = useState(
+    doctors.some((item) => item.id === requestedDoctorId) ? requestedDoctorId : doctors[0]?.id || ""
+  );
   const [selectedDate, setSelectedDate] = useState(state.meta.today);
   const [selectedSlotId, setSelectedSlotId] = useState("");
   const [visitType, setVisitType] = useState("booked");
@@ -40,6 +44,17 @@ export function BookingPage() {
   );
   const selectedSchedule = doctor ? getScheduleByDate(state, doctor.id, selectedDate) : null;
   const confirmationBundle = confirmationId ? state.appointments.byId[confirmationId] : null;
+
+  useEffect(() => {
+    if (requestedDoctorId && doctors.some((item) => item.id === requestedDoctorId)) {
+      setSelectedDoctorId(requestedDoctorId);
+      return;
+    }
+
+    if (!doctors.some((item) => item.id === selectedDoctorId)) {
+      setSelectedDoctorId(doctors[0]?.id || "");
+    }
+  }, [requestedDoctorId, doctors, selectedDoctorId]);
 
   useEffect(() => {
     if (!doctor) {

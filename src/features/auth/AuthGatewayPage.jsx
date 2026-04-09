@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { ShieldCheck, Stethoscope, UserRound } from "lucide-react";
+import { Microscope, ShieldCheck, Stethoscope, UserRound } from "lucide-react";
 import { AppShell, FloatingAccent } from "../../components/layout/AppShell";
 import { Button } from "../../components/ui/Button";
 import { Card, CardHeader } from "../../components/ui/Card";
@@ -24,6 +24,12 @@ const roles = [
     icon: ShieldCheck,
     title: "Admin access",
     description: "Approve doctors, maintain schedules, oversee appointments, and manage clinic operations."
+  },
+  {
+    role: "lab",
+    icon: Microscope,
+    title: "Lab access",
+    description: "Review test orders, update progress, complete reports, and publish downloadable outputs."
   }
 ];
 
@@ -45,10 +51,10 @@ export function AuthGatewayPage() {
             <div className="space-y-4">
               <div className="pill border-white/15 bg-white/10 text-white">Frontend-only role auth</div>
               <h2 className="max-w-3xl text-3xl font-semibold tracking-tight sm:text-5xl">
-                One clinic, three workspaces, one continuous care flow.
+                One clinic, four workspaces, one continuous care flow.
               </h2>
               <p className="max-w-2xl text-sm leading-7 text-white/80 sm:text-base">
-                Patients can sign up with richer but optional profile details, doctors can self-register and wait for approval, and admins can operate the clinic from one place.
+                Patients, doctors, admins, and lab technicians can all move the same mock care journey forward without any backend integration yet.
               </p>
             </div>
             <div className="grid gap-3">
@@ -58,13 +64,14 @@ export function AuthGatewayPage() {
                   <div>Admin: `admin@nira.local / Admin@123`</div>
                   <div>Doctor: `nisha.mehra@nira.local / Doctor@123`</div>
                   <div>Patient: `+91 98765 43210 / Patient@123`</div>
+                  <div>Lab: `lab@nira.local / Lab@123`</div>
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-3">
+        <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-4">
           {roles.map((entry) => {
             const Icon = entry.icon;
             return (
@@ -82,7 +89,7 @@ export function AuthGatewayPage() {
                     <Button asChild>
                       <Link to={`/auth/login/${entry.role}`}>Login</Link>
                     </Button>
-                    {entry.role !== "admin" || !adminExists ? (
+                    {(entry.role === "patient" || entry.role === "doctor" || (entry.role === "admin" && !adminExists)) ? (
                       <Button asChild variant="secondary">
                         <Link to={`/auth/signup/${entry.role}`}>Sign up</Link>
                       </Button>

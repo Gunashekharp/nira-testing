@@ -1,5 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { demoStore } from "../services/demoStore";
+import { downloadLabReportPdf, downloadPrescriptionPdf } from "../services/documentDownloads";
 
 const DemoDataContext = createContext(null);
 
@@ -116,9 +117,66 @@ export function DemoDataProvider({ children }) {
           const snapshot = await demoStore.approveEncounter(appointmentId, payload);
           setState(snapshot);
           return snapshot;
+        },
+        async sendLabOrder(appointmentId, payload) {
+          const snapshot = await demoStore.sendLabOrder(appointmentId, payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async updateLabOrder(labOrderId, payload) {
+          const snapshot = await demoStore.updateLabOrder(labOrderId, payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async cancelLabOrder(labOrderId) {
+          const snapshot = await demoStore.cancelLabOrder(labOrderId);
+          setState(snapshot);
+          return snapshot;
+        },
+        async markSampleReceived(labOrderId) {
+          const snapshot = await demoStore.markSampleReceived(labOrderId);
+          setState(snapshot);
+          return snapshot;
+        }
+      },
+      lab: {
+        async markSampleReceived(labOrderId) {
+          const snapshot = await demoStore.markSampleReceived(labOrderId);
+          setState(snapshot);
+          return snapshot;
+        },
+        async startLabOrder(labOrderId) {
+          const snapshot = await demoStore.startLabOrder(labOrderId);
+          setState(snapshot);
+          return snapshot;
+        },
+        async completeLabOrder(labOrderId, payload) {
+          const snapshot = await demoStore.completeLabOrder(labOrderId, payload);
+          setState(snapshot);
+          return snapshot;
         }
       },
       admin: {
+        async addPatient(payload) {
+          const snapshot = await demoStore.addPatient(payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async updatePatient(patientId, payload) {
+          const snapshot = await demoStore.updatePatient(patientId, payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async archivePatient(patientId) {
+          const snapshot = await demoStore.archivePatient(patientId);
+          setState(snapshot);
+          return snapshot;
+        },
+        async restorePatient(patientId) {
+          const snapshot = await demoStore.restorePatient(patientId);
+          setState(snapshot);
+          return snapshot;
+        },
         async addDoctor(payload) {
           const snapshot = await demoStore.addDoctor(payload);
           setState(snapshot);
@@ -170,9 +228,45 @@ export function DemoDataProvider({ children }) {
           return snapshot;
         }
       },
+      documents: {
+        downloadPrescription(prescriptionId) {
+          if (!state) {
+            return false;
+          }
+
+          const prescription = state.prescriptions.byId[prescriptionId];
+          if (!prescription) {
+            return false;
+          }
+
+          return downloadPrescriptionPdf({
+            prescription,
+            patient: state.patients.byId[prescription.patientId],
+            doctor: state.doctors.byId[prescription.doctorId]
+          });
+        },
+        downloadLabReport(labReportId) {
+          if (!state) {
+            return false;
+          }
+
+          const report = state.labReports.byId[labReportId];
+          if (!report) {
+            return false;
+          }
+
+          const order = state.labOrders.byId[report.labOrderId];
+          return downloadLabReportPdf({
+            report,
+            order,
+            patient: state.patients.byId[report.patientId],
+            doctor: state.doctors.byId[report.doctorId]
+          });
+        }
+      },
       refresh
     }),
-    []
+    [state]
   );
 
   const value = useMemo(
