@@ -1,0 +1,74 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --surface: #f5f3ee;
+  --surface-2: #fffdf9;
+  --ink: #112331;
+  --muted: #5b6e7b;
+  --line: rgba(17, 35, 49, 0.1);
+  --brand-midnight: #0f3344;
+  --brand-tide: #14596e;
+  --brand-sky: #52bfc4;
+  --brand-mint: #dff6ef;
+  --brand-amber: #f5c168;
+  --brand-coral: #f08b72;
+}
+
+@layer base {
+  * {
+    @apply border-line;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply min-h-screen bg-surface bg-hero-glow text-ink font-sans;
+  }
+
+  a {
+    @apply text-inherit no-underline;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply rounded-[28px] border border-white/60 bg-white/80 shadow-panel backdrop-blur-md;
+  }
+
+  .section-title {
+    @apply text-xs font-semibold uppercase tracking-[0.24em] text-brand-tide;
+  }
+
+  .field-shell {
+    @apply rounded-2xl border border-line bg-surface-2 px-4 py-3 shadow-soft transition-all duration-200 focus-within:border-brand-sky focus-within:ring-2 focus-within:ring-cyan-200;
+  }
+
+  .pill {
+    @apply inline-flex items-center gap-2 rounded-full border border-line bg-white/80 px-3 py-1 text-xs font-semibold text-ink;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
