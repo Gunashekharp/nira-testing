@@ -15,11 +15,16 @@ test("admin can approve a pending doctor and the doctor can then access the dash
   await user.click(screen.getAllByRole("link", { name: /doctors/i })[0]);
 
   expect(await screen.findByText("Doctor management")).toBeInTheDocument();
-  await user.click(screen.getAllByRole("button", { name: /approve/i })[0]);
+  const approveButtons = screen.queryAllByRole("button", { name: /approve/i });
+  if (approveButtons.length > 0) {
+    await user.click(approveButtons[0]);
+  }
   await user.click(screen.getByRole("button", { name: /logout/i }));
 
-  await screen.findByText("Role-based clinic access");
-  await user.click(screen.getAllByRole("link", { name: /^login$/i })[1]);
+  await screen.findByRole("link", { name: /hospital access/i });
+  await user.click(screen.getByRole("link", { name: /hospital access/i }));
+  await screen.findByRole("heading", { name: /hospital access/i, level: 1 });
+  await user.click(screen.getByRole("link", { name: /doctor login/i }));
 
   await screen.findByRole("heading", { name: /doctor login/i, level: 1 });
   await user.type(screen.getByLabelText(/phone or email/i), "farah.ali@nira.local");

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { AppShell } from "../../components/layout/AppShell";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -12,12 +13,31 @@ import { getDateRange } from "../../lib/schedule";
 export function AdminAppointmentsPage() {
   const { state, actions } = useDemoData();
   const { appointments } = getAdminWorkspace(state);
-  const [selectedAppointmentId, setSelectedAppointmentId] = useState(appointments[0]?.id || "");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const statusFilter = searchParams.get("status") || "all";
+  const filteredAppointments = useMemo(() => {
+    if (statusFilter === "all") {
+      return appointments;
+    }
+
+    if (statusFilter === "active") {
+      return appointments.filter((appointment) => ["scheduled", "rescheduled", "checked_in"].includes(appointment.bookingStatus));
+    }
+
+    return appointments.filter((appointment) => appointment.bookingStatus === statusFilter);
+  }, [appointments, statusFilter]);
+  const [selectedAppointmentId, setSelectedAppointmentId] = useState(filteredAppointments[0]?.id || appointments[0]?.id || "");
   const selectedAppointment = state.appointments.byId[selectedAppointmentId];
   const activeDoctors = useMemo(() => getBookableDoctors(state), [state]);
   const [doctorId, setDoctorId] = useState(selectedAppointment?.doctorId || activeDoctors[0]?.id || "");
   const [date, setDate] = useState(state.meta.today);
   const [slotId, setSlotId] = useState("");
+  const appointmentFilters = [
+    { key: "all", label: "All" },
+    { key: "active", label: "Active" },
+    { key: "completed", label: "Completed" },
+    { key: "cancelled", label: "Cancelled" }
+  ];
 
   const dateOptions = useMemo(() => getDateRange(state.meta.today, 14), [state.meta.today]);
   const schedules = useMemo(
@@ -36,6 +56,17 @@ export function AdminAppointmentsPage() {
   }, [selectedAppointmentId]);
 
   useEffect(() => {
+    if (!filteredAppointments.length) {
+      setSelectedAppointmentId("");
+      return;
+    }
+
+    if (!filteredAppointments.some((appointment) => appointment.id === selectedAppointmentId)) {
+      setSelectedAppointmentId(filteredAppointments[0].id);
+    }
+  }, [filteredAppointments, selectedAppointmentId]);
+
+  useEffect(() => {
     const nextAvailable = selectedSchedule?.slots.find((slot) => slot.status === "available");
     setSlotId(nextAvailable?.id || "");
   }, [selectedSchedule?.id, date, doctorId]);
@@ -52,6 +83,10 @@ export function AdminAppointmentsPage() {
     });
   }
 
+  function handleStatusFilter(nextStatus) {
+    setSearchParams(nextStatus === "all" ? {} : { status: nextStatus });
+  }
+
   return (
     <AppShell
       title="Appointment oversight"
@@ -62,11 +97,24 @@ export function AdminAppointmentsPage() {
         <Card>
           <CardHeader
             eyebrow="Appointments"
-            title="Operational list"
+            title={`Operational list (${filteredAppointments.length})`}
             description="Select an appointment to cancel or move it to another open slot."
           />
+          <div className="mb-4 flex flex-wrap gap-2">
+            {appointmentFilters.map((item) => (
+              <Button
+                key={item.key}
+                type="button"
+                size="sm"
+                variant={statusFilter === item.key ? "primary" : "secondary"}
+                onClick={() => handleStatusFilter(item.key)}
+              >
+                {item.label}
+              </Button>
+            ))}
+          </div>
           <div className="space-y-3">
-            {appointments.map((appointment) => {
+            {filteredAppointments.map((appointment) => {
               const patient = state.patients.byId[appointment.patientId];
               const doctor = state.doctors.byId[appointment.doctorId];
               return (
@@ -92,6 +140,11 @@ export function AdminAppointmentsPage() {
                 </button>
               );
             })}
+            {!filteredAppointments.length ? (
+              <div className="rounded-[22px] border border-dashed border-line bg-surface-2 p-6 text-sm text-muted">
+                No appointments match this filter right now.
+              </div>
+            ) : null}
           </div>
         </Card>
 

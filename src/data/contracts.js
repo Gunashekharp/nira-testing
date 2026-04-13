@@ -1,7 +1,7 @@
 /**
  * @typedef {Object} UserAccount
  * @property {string} id
- * @property {"patient"|"doctor"|"admin"|"lab"} role
+ * @property {"patient"|"doctor"|"nurse"|"admin"} role
  * @property {"active"|"pending_approval"|"inactive"|"archived"} status
  * @property {string} phone
  * @property {string} email
@@ -14,7 +14,7 @@
 /**
  * @typedef {Object} AuthSession
  * @property {string | null} userId
- * @property {"patient"|"doctor"|"admin"|"lab"|null} role
+ * @property {"patient"|"doctor"|"nurse"|"admin"|null} role
  * @property {boolean} isAuthenticated
  * @property {string | null} activeProfileId
  * @property {string} identifier
@@ -25,6 +25,7 @@
  * @property {string} id
  * @property {string} userId
  * @property {string} fullName
+ * @property {string} profilePhoto
  * @property {string} preferredLanguage
  * @property {number | null} age
  * @property {string} gender
@@ -42,6 +43,7 @@
  * @property {string} id
  * @property {string} userId
  * @property {string} fullName
+ * @property {string} profilePhoto
  * @property {string} specialty
  * @property {string} clinic
  * @property {string} licenseNumber
@@ -57,19 +59,29 @@
  * @property {string} id
  * @property {string} userId
  * @property {string} fullName
+ * @property {string} profilePhoto
  * @property {string} clinicName
  * @property {string} phone
  * @property {string} email
  */
 
 /**
- * @typedef {Object} LabTechnicianProfile
+ * @typedef {Object} NurseProfile
  * @property {string} id
  * @property {string} userId
  * @property {string} fullName
+ * @property {string} profilePhoto
+ * @property {string} clinic
+ * @property {string} department
+ * @property {string} shift
+ * @property {string} assignedWard
+ * @property {string} nursingLicenseNumber
+ * @property {number | null} yearsExperience
  * @property {string} phone
  * @property {string} email
- * @property {"active"|"inactive"|"archived"} status
+ * @property {string} emergencyContactName
+ * @property {string} emergencyContactPhone
+ * @property {string} notes
  */
 
 /**
@@ -123,51 +135,20 @@
  * @property {"awaiting_interview"|"ai_ready"|"in_consult"|"approved"|"closed"} status
  * @property {string} interviewId
  * @property {string | null} prescriptionId
- * @property {Array<{testId: string, reason: string}>} labSuggestions
- * @property {string[]} labOrderIds
- */
-
-/**
- * @typedef {Object} LabCatalogItem
- * @property {string} id
- * @property {string} name
- * @property {string} category
- * @property {string} sampleType
- * @property {string} turnaroundLabel
- */
-
-/**
- * @typedef {Object} LabOrderRecord
- * @property {string} id
- * @property {string} appointmentId
- * @property {string} patientId
- * @property {string} doctorId
- * @property {string} createdByUserId
- * @property {string | null} assignedLabUserId
- * @property {"ordered"|"sample_received"|"processing"|"completed"|"cancelled"} status
- * @property {string[]} selectedTestIds
- * @property {string} clinicianNote
- * @property {string} orderedAt
- * @property {string | null} sampleReceivedAt
- * @property {string | null} processingStartedAt
- * @property {string | null} completedAt
- * @property {string | null} cancelledAt
- * @property {string | null} cancelledByUserId
- * @property {string | null} lastEditedAt
- * @property {string | null} reportId
  */
 
 /**
  * @typedef {Object} LabReportRecord
  * @property {string} id
- * @property {string} labOrderId
+ * @property {string} appointmentId
  * @property {string} patientId
  * @property {string} doctorId
- * @property {Array<{testId: string, name: string, result: string, unit: string, referenceRange: string, flag: string}>} resultItems
- * @property {string} summary
- * @property {string} completedByUserId
- * @property {string} completedAt
- * @property {{fileName: string}} downloadMeta
+ * @property {string} title
+ * @property {string} category
+ * @property {string} findings
+ * @property {string} resultSummary
+ * @property {"draft"|"final"} status
+ * @property {string} updatedAt
  */
 
 export {};

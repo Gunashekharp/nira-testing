@@ -1,358 +1,263 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowRight, ClipboardList, Clock3, Filter, Microscope, Search, Sparkles } from "lucide-react";
+import { ArrowRight, Clock3, Filter, Shield } from "lucide-react";
 import { AppShell } from "../../components/layout/AppShell";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card, CardHeader } from "../../components/ui/Card";
-import { Input } from "../../components/ui/FormFields";
 import { StatCard } from "../../components/ui/StatCard";
 import { useDemoData } from "../../app/DemoDataProvider";
-import { getDoctorWorkspace } from "../shared/selectors";
-import { formatTime } from "../../lib/format";
+import { getDoctorWorkspace, getCurrentProfile } from "../shared/selectors";
+import { formatConfidence, formatStatus, formatTime } from "../../lib/format";
 import { initials } from "../../lib/utils";
-
-const queueFilters = [
-  { id: "all", label: "All patients" },
-  { id: "awaiting_interview", label: "Awaiting interview" },
-  { id: "ai_ready", label: "AI chat completed" },
-  { id: "in_consult", label: "Under consultation" },
-  { id: "approved", label: "Completed today" }
-];
-
-const labFilters = [
-  { id: "all", label: "All requests" },
-  { id: "ordered", label: "Requested" },
-  { id: "sample_received", label: "Sample received" },
-  { id: "processing", label: "Processing" },
-  { id: "completed", label: "Completed" },
-  { id: "cancelled", label: "Cancelled" }
-];
-
-function getQueueTone(status) {
-  if (status === "approved") return "success";
-  if (status === "ai_ready") return "info";
-  if (status === "in_consult") return "warning";
-  if (status === "awaiting_interview") return "neutral";
-  return "neutral";
-}
-
-function getQueueLabel(status) {
-  if (status === "ai_ready") return "AI chat completed";
-  if (status === "in_consult") return "Under consultation";
-  if (status === "approved") return "Completed today";
-  if (status === "awaiting_interview") return "Awaiting interview";
-  return "Patients in queue";
-}
-
-function DashboardCardButton({ active, onClick, label, value, tone = "default" }) {
-  return (
-    <button type="button" onClick={onClick} className="text-left">
-      <StatCard
-        label={label}
-        value={`${value}`}
-        tone={tone}
-        className={active ? "ring-2 ring-cyan-200 shadow-panel" : "transition hover:-translate-y-0.5 hover:shadow-panel"}
-      />
-    </button>
-  );
-}
-
-function LabProgressInline({ progress }) {
-  return (
-    <div className="flex flex-wrap gap-2">
-      {progress.map((step) => (
-        <span
-          key={step.key}
-          className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-            step.current
-              ? "border-cyan-200 bg-brand-mint text-brand-midnight"
-              : step.done
-                ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-                : "border-line bg-white text-muted"
-          }`}
-        >
-          {step.label}
-        </span>
-      ))}
-    </div>
-  );
-}
+import { useTranslation } from "../../hooks/useTranslation";
 
 export function DoctorDashboardPage() {
   const { state } = useDemoData();
-  const { doctor, appointments, queueCounts, labOrders, labCounts } = getDoctorWorkspace(state);
-  const [viewMode, setViewMode] = useState("queue");
-  const [queueFilter, setQueueFilter] = useState("all");
-  const [labFilter, setLabFilter] = useState("all");
-  const [labSearch, setLabSearch] = useState("");
+  const { t } = useTranslation();
 
-  const filteredAppointments = useMemo(
-    () => appointments.filter((item) => queueFilter === "all" || item.queueStatus === queueFilter),
-    [appointments, queueFilter]
+  const isPreCheckDone = (item) => ["complete", "completed"].includes(String(item?.interview?.completionStatus || "").toLowerCase());
+
+  const getQueueDisplayStatus = (item) => {
+    if (item.queueStatus === "approved" || item.bookingStatus === "completed") return t("completedToday");
+    if (item.queueStatus === "in_consult") return t("underConsultation");
+    if (isPreCheckDone(item) || item.queueStatus === "ai_ready") return t("aiChatCompleted");
+    return formatStatus(item.queueStatus);
+  };
+
+  const getChiefComplaintDisplay = (item) => {
+    const complaint = String(item?.draft?.soap?.chiefComplaint || item?.chiefComplaint || "").trim();
+    const isPendingSymptomNote = /pending symptom (interview|check)/i.test(complaint) || /interview pending/i.test(complaint);
+    if (item?.queueStatus === "awaiting_interview" && isPendingSymptomNote) return "-";
+    return complaint || "-";
+  };
+  
+  const filters = [
+    { key: "all", label: t("allPatients") },
+    { key: "pre_check", label: t("preCheckStage") },
+    { key: "in_consult", label: t("underConsultation") },
+    { key: "approved", label: t("completedToday") }
+  ];
+
+  function toneForStatus(status) {
+    if (status === "approved") return "success";
+    if (status === "ai_ready") return "info";
+    if (status === "awaiting_interview") return "warning";
+    return "neutral";
+  }
+
+  const { doctor, appointments, queueCounts, labReports } = getDoctorWorkspace(state);
+  const profile = getCurrentProfile(state);
+  const isPending = ["pending_approval", "pending"].includes(String(profile?.status || "").toLowerCase());
+  const [filter, setFilter] = useState("all");
+
+  const dashboardStats = useMemo(
+    () => [
+      { label: "Patients in queue", value: queueCounts.total, tone: "accent", filterKey: "all" },
+      {
+        label: "Pre-check stage",
+        value: appointments.filter((item) => ["awaiting_interview", "ai_ready"].includes(item.queueStatus)).length,
+        tone: "soft",
+        filterKey: "pre_check"
+      },
+      { label: "Under consultation", value: queueCounts.inConsult, tone: "default", filterKey: "in_consult" },
+      {
+        label: "Completed today",
+        value: appointments.filter((item) => item.queueStatus === "approved" || item.bookingStatus === "completed").length,
+        tone: "default",
+        filterKey: "approved"
+      },
+      { label: "Lab requests", value: labReports.length, tone: "default", to: "/doctor/lab-reports" },
+      { label: "Doctor availability", value: doctor?.availability?.length || 0, tone: "soft", to: "/doctor/availability" }
+    ],
+    [appointments, doctor?.availability?.length, labReports.length, queueCounts.inConsult, queueCounts.total]
   );
 
-  const filteredLabOrders = useMemo(() => {
-    const normalizedQuery = labSearch.trim().toLowerCase();
-
-    return labOrders.filter((order) => {
-      const matchesStatus = labFilter === "all" || order.status === labFilter;
-      const matchesQuery =
-        !normalizedQuery ||
-        order.patient?.fullName?.toLowerCase().includes(normalizedQuery) ||
-        order.tests.some((test) => test.name.toLowerCase().includes(normalizedQuery));
-
-      return matchesStatus && matchesQuery;
-    });
-  }, [labOrders, labFilter, labSearch]);
+  const filteredAppointments = useMemo(
+    () =>
+      appointments.filter((item) => {
+        if (filter === "all") return true;
+        if (filter === "pre_check") {
+          return ["awaiting_interview", "ai_ready"].includes(item.queueStatus);
+        }
+        return item.queueStatus === filter;
+      }),
+    [appointments, filter]
+  );
 
   return (
     <AppShell
       title="Doctor validation workspace"
-      subtitle="Review only your own queue, validate APCI drafts, manage lab requests, and approve the final prescription from one workspace."
+      subtitle="Review only your own queue, validate APCI drafts, manage availability, and approve the final prescription from one workspace."
       languageLabel="Doctor UI in English"
     >
       <div className="space-y-6">
+        {isPending ? (
+          <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-5">
+            <div className="flex items-start gap-3">
+              <Shield className="h-5 w-5 text-amber-700 mt-0.5 flex-shrink-0" />
+              <div>
+                <div className="text-sm font-semibold text-amber-950">Pending Admin Approval</div>
+                <div className="mt-1 text-sm text-amber-900">
+                  Your doctor account is pending approval from the clinic admin. You can explore the workspace, but clinical operations will be fully unlocked once approved.
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-          <DashboardCardButton
-            active={viewMode === "queue" && queueFilter === "all"}
-            onClick={() => {
-              setViewMode("queue");
-              setQueueFilter("all");
-            }}
-            label="Patients in queue"
-            value={queueCounts.total}
-            tone="accent"
-          />
-          <DashboardCardButton
-            active={viewMode === "queue" && queueFilter === "ai_ready"}
-            onClick={() => {
-              setViewMode("queue");
-              setQueueFilter("ai_ready");
-            }}
-            label="AI chat completed"
-            value={queueCounts.aiReady}
-            tone="soft"
-          />
-          <DashboardCardButton
-            active={viewMode === "queue" && queueFilter === "in_consult"}
-            onClick={() => {
-              setViewMode("queue");
-              setQueueFilter("in_consult");
-            }}
-            label="Under consultation"
-            value={queueCounts.inConsult}
-          />
-          <DashboardCardButton
-            active={viewMode === "queue" && queueFilter === "approved"}
-            onClick={() => {
-              setViewMode("queue");
-              setQueueFilter("approved");
-            }}
-            label="Completed today"
-            value={queueCounts.approved}
-          />
-          <DashboardCardButton
-            active={viewMode === "labs"}
-            onClick={() => setViewMode("labs")}
-            label="Lab requests"
-            value={labCounts.total}
-          />
+          {dashboardStats.map((item) => (
+            <StatCard
+              key={item.label}
+              label={item.label}
+              value={`${item.value}`}
+              tone={item.tone}
+              to={item.to}
+              onClick={item.filterKey ? () => setFilter(item.filterKey) : undefined}
+              active={item.filterKey ? filter === item.filterKey : false}
+            />
+          ))}
         </div>
 
+        <Card density="compact">
+          <CardHeader
+            eyebrow="Doctor profile"
+            title="Your profile at a glance"
+            description="Keep your public-facing details updated so patients and admins always see the latest credentials."
+          />
+          <div className="grid gap-4 md:grid-cols-[1.3fr_1fr_auto] md:items-center">
+            <div>
+              <div className="text-lg font-semibold text-ink">{profile?.fullName || doctor?.fullName || "Doctor"}</div>
+              <div className="mt-1 text-sm text-muted">
+                {(profile?.specialty || doctor?.specialty || "General Practice")}
+                {profile?.licenseNumber ? ` · License ${profile.licenseNumber}` : ""}
+              </div>
+              <div className="mt-2 text-sm text-muted">{profile?.clinic || doctor?.clinic || "Clinic details not added yet"}</div>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-1">
+              <Badge tone="info">Phone: {doctor?.phone || "Not set"}</Badge>
+              <Badge tone="neutral">Status: {isPending ? "Pending approval" : "Active"}</Badge>
+            </div>
+            <Button asChild>
+              <Link to="/doctor/profile">
+                Manage profile
+                <ArrowRight className="h-4 w-4" />
+              </Link>
+            </Button>
+          </div>
+        </Card>
         <Card>
           <CardHeader
-            eyebrow={viewMode === "queue" ? "Queue control" : "Lab request worklist"}
+            eyebrow="Queue control"
             title={doctor ? `${doctor.fullName} · ${doctor.specialty}` : "Doctor workspace"}
-            description={
-              viewMode === "queue"
-                ? "Use the cards and filters to focus the queue on the next patients who need your attention."
-                : "Search lab requests by patient name, follow request progress, and jump back into the EMR when a result needs review."
-            }
+            description="Use the filter chips to focus on the next patients who need your attention."
           />
-
-          {viewMode === "queue" ? (
-            <div className="flex flex-wrap gap-2">
-              {queueFilters.map((option) => (
-                <Button
-                  key={option.id}
-                  variant={queueFilter === option.id ? "primary" : "secondary"}
-                  size="sm"
-                  onClick={() => setQueueFilter(option.id)}
-                >
-                  {option.id === "all" ? (
-                    <>
-                      <Filter className="h-4 w-4" />
-                      {option.label}
-                    </>
-                  ) : (
-                    option.label
-                  )}
-                </Button>
-              ))}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              <div className="grid gap-3 lg:grid-cols-[1.1fr_auto]">
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-muted" />
-                  <Input
-                    value={labSearch}
-                    onChange={(event) => setLabSearch(event.target.value)}
-                    placeholder="Search by patient or test name"
-                    className="pl-11"
-                  />
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {labFilters.map((option) => (
-                    <Button
-                      key={option.id}
-                      variant={labFilter === option.id ? "primary" : "secondary"}
-                      size="sm"
-                      onClick={() => setLabFilter(option.id)}
-                    >
-                      {option.label}
-                    </Button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="grid gap-4">
-                {filteredLabOrders.map((order) => (
-                  <div key={order.id} className="glass-card p-5">
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div className="space-y-2">
-                        <div className="flex flex-wrap items-center gap-3">
-                          <h3 className="text-lg font-semibold tracking-tight text-ink">{order.patient?.fullName}</h3>
-                          <Badge tone={order.tone}>{order.doctorStatusLabel}</Badge>
-                        </div>
-                        <div className="text-sm text-muted">
-                          {order.doctor?.fullName} · Ordered {new Date(order.orderedAt).toLocaleDateString("en-IN")}
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          {order.tests.map((test) => (
-                            <span key={test.id} className="pill">
-                              {test.name}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                      <Button asChild variant="secondary" size="sm">
-                        <Link to={`/doctor/patient/${order.appointmentId}`}>
-                          Open EMR
-                          <ArrowRight className="h-4 w-4" />
-                        </Link>
-                      </Button>
-                    </div>
-
-                    <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_auto] lg:items-center">
-                      <LabProgressInline progress={order.progress} />
-                      <div className="text-sm text-muted">
-                        {order.status === "completed"
-                          ? "Report ready to review"
-                          : order.status === "cancelled"
-                            ? "Request cancelled"
-                            : "Awaiting next lab step"}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-
-                {!filteredLabOrders.length ? (
-                  <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-8 text-center text-sm text-muted">
-                    No lab requests match the current search or filter.
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          )}
+          <div className="flex flex-wrap gap-2">
+            {filters.map((option) => (
+              <Button
+                key={option.key}
+                variant={filter === option.key ? "primary" : "secondary"}
+                size="sm"
+                onClick={() => setFilter(option.key)}
+              >
+                {option.key === "all" ? (
+                  <>
+                    <Filter className="h-4 w-4" />
+                    {option.label}
+                  </>
+                ) : (
+                  option.label
+                )}
+              </Button>
+            ))}
+          </div>
         </Card>
 
-        {viewMode === "queue" ? (
-          <div className="grid gap-4 xl:grid-cols-2">
-            {filteredAppointments.map((item) => (
-              <Link key={item.id} to={`/doctor/patient/${item.id}`}>
-                <div className="glass-card h-full p-6 transition hover:-translate-y-1 hover:shadow-panel">
-                  <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div className="flex items-start gap-4">
-                      <div className="flex h-14 w-14 items-center justify-center rounded-[20px] bg-brand-midnight text-white">
-                        <span className="text-sm font-semibold">{initials(item.patient?.fullName)}</span>
-                      </div>
-                      <div>
-                        <div className="flex flex-wrap items-center gap-3">
-                          <h3 className="text-xl font-semibold tracking-tight text-ink">{item.patient?.fullName}</h3>
-                          <Badge tone={getQueueTone(item.queueStatus)}>{getQueueLabel(item.queueStatus)}</Badge>
-                        </div>
-                        <p className="mt-2 text-sm text-muted">
-                          Token {item.token} · {formatTime(item.startAt)}
-                        </p>
-                      </div>
-                    </div>
-                    <ArrowRight className="h-5 w-5 text-brand-tide" />
-                  </div>
-
-                  <div className="mt-5 grid gap-4 md:grid-cols-[1fr_auto] md:items-center">
-                    <div className="space-y-2">
-                      <div className="text-sm font-semibold text-ink">
-                        {item.draft?.soap?.chiefComplaint || "Interview still pending"}
-                      </div>
-                      <div className="text-sm leading-6 text-muted">
-                        {item.draft?.soap?.assessment ||
-                          "The patient has not completed the AI chat yet, so the chart still needs intake before review."}
-                      </div>
-                    </div>
-                    <div className="space-y-2 text-sm text-muted">
-                      <div className="flex items-center gap-2">
-                        <Sparkles className="h-4 w-4 text-brand-sky" />
-                        Confidence {item.draft ? `${Math.round(item.draft.confidenceMap.assessment * 100)}%` : "--"}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Clock3 className="h-4 w-4 text-brand-tide" />
-                        {getQueueLabel(item.queueStatus)}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mt-5 flex flex-wrap gap-2">
-                    {(item.draft?.alerts || ["Interview pending"]).slice(0, 2).map((alert) => (
-                      <span key={alert} className="pill">
-                        {alert}
-                      </span>
-                    ))}
-                    {item.latestLabOrder ? <span className="pill">Lab {item.latestLabOrder.doctorStatusLabel}</span> : null}
-                  </div>
-                </div>
-              </Link>
-            ))}
-            {filteredAppointments.length === 0 ? (
-              <Card className="xl:col-span-2">
-                <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-8 text-center text-sm text-muted">
-                  No patients match this queue filter right now.
-                </div>
-              </Card>
-            ) : null}
-          </div>
-        ) : (
+        {filteredAppointments.length === 0 ? (
           <Card>
-            <CardHeader
-              eyebrow="Doctor workflow"
-              title="Lab requests stay inside the same workspace"
-              description="Requests, progress checks, and EMR review now stay connected so you do not have to jump between unrelated screens."
-            />
-            <div className="grid gap-3 md:grid-cols-3">
-              {[
-                "Click any lab request to open the patient EMR and continue the same consultation flow.",
-                "Doctors can edit or cancel a request only before the lab has started working on it.",
-                "Completed reports stay available for both doctor review and patient download."
-              ].map((item) => (
-                <div key={item} className="rounded-[22px] border border-line bg-surface-2 p-4 text-sm leading-6 text-muted">
-                  <ClipboardList className="mb-3 h-5 w-5 text-brand-tide" />
-                  {item}
-                </div>
-              ))}
+            <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-8 text-center text-sm text-muted">
+              No patients match this filter in the dummy queue right now.
+            </div>
+          </Card>
+        ) : (
+          <Card className="overflow-hidden p-0">
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-line">
+                <thead className="bg-surface-2">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted">Patient</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted">Queue status</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted">Token & time</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted">ABHA</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted">Chief complaint</th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-muted">Signals</th>
+                    <th className="px-4 py-3 text-right text-xs font-semibold uppercase tracking-wide text-muted">Open</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-line bg-white">
+                  {filteredAppointments.map((item) => {
+                    return (
+                      <tr key={item.id} className="transition hover:bg-cyan-50/40">
+                        <td className="px-4 py-4 align-top">
+                          <div className="flex items-center gap-3 min-w-[220px]">
+                            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-brand-midnight text-white">
+                              <span className="text-sm font-semibold">{initials(item.patient?.fullName)}</span>
+                            </div>
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-semibold text-ink">{item.patient?.fullName}</div>
+                              <div className="mt-1 text-xs text-muted">{item.patient?.gender || "Patient"}</div>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 align-top text-sm text-muted">
+                          <div className="space-y-1">
+                            <Badge tone={toneForStatus(item.queueStatus)}>{getQueueDisplayStatus(item)}</Badge>
+                            <div>{item.queueStatus ? formatStatus(item.queueStatus) : "—"}</div>
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 align-top text-sm text-muted">
+                          <div className="flex items-center gap-2 font-medium text-ink">
+                            <Clock3 className="h-4 w-4 text-brand-tide" />
+                            Token {item.token || "--"}
+                          </div>
+                          <div className="mt-1 text-xs text-muted">{formatTime(item.startAt)}</div>
+                        </td>
+                        <td className="px-4 py-4 align-top text-sm text-muted">
+                          {item.patient?.abhaNumber || item.patient?.abha || item.abhaId || "Not linked"}
+                        </td>
+                        <td className="px-4 py-4 align-top text-sm text-ink">
+                          <div className="font-semibold">{getChiefComplaintDisplay(item)}</div>
+                          <div className="mt-1 max-w-[30rem] text-sm leading-6 text-muted">
+                            {item.draft?.soap?.assessment || "Patient has not completed the pre-check yet, so the chart is still empty."}
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 align-top text-sm text-muted">
+                          <div className="flex flex-wrap gap-2">
+                            {(item.draft?.alerts || ["Awaiting doctor review"]).slice(0, 2).map((alert) => (
+                              <span key={alert} className="pill">
+                                {alert}
+                              </span>
+                            ))}
+                            {item.dbSync?.encounterId ? <Badge tone="success" className="text-xs">DB linked</Badge> : null}
+                          </div>
+                        </td>
+                        <td className="px-4 py-4 align-top text-right">
+                          <Button asChild variant="secondary" className="h-8 px-3">
+                            <Link to={`/doctor/patient/${item.id}`}>
+                              Open
+                              <ArrowRight className="h-4 w-4" />
+                            </Link>
+                          </Button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </Card>
         )}
+
       </div>
     </AppShell>
   );

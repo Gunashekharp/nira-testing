@@ -5,16 +5,22 @@ import { Card, CardHeader } from "../components/ui/Card";
 import { useDemoData } from "./DemoDataProvider";
 import { getCurrentProfile, getRoleHomePath, hasAdminAccount } from "../features/shared/selectors";
 
+const VALID_ROLES = new Set(["patient", "doctor", "nurse", "admin"]);
+
+function hasValidRole(role) {
+  return VALID_ROLES.has(role);
+}
+
 export function RootRedirect() {
   const { state } = useDemoData();
-  const path = state.session.isAuthenticated ? getRoleHomePath(state.session.role) : "/auth";
+  const path = state.session.isAuthenticated && hasValidRole(state.session.role) ? getRoleHomePath(state.session.role) : "/auth";
   return <Navigate to={path} replace />;
 }
 
 export function GuestOnlyRoute() {
   const { state } = useDemoData();
 
-  if (state.session.isAuthenticated) {
+  if (state.session.isAuthenticated && hasValidRole(state.session.role)) {
     return <Navigate to={getRoleHomePath(state.session.role)} replace />;
   }
 
@@ -34,7 +40,7 @@ export function ProtectedRoute() {
 export function RoleRoute({ role }) {
   const { state } = useDemoData();
 
-  if (state.session.role !== role) {
+  if (!hasValidRole(state.session.role) || state.session.role !== role) {
     return <Navigate to={getRoleHomePath(state.session.role)} replace />;
   }
 
@@ -54,26 +60,27 @@ export function FirstAdminGate() {
 export function DoctorStatusGate() {
   const { state } = useDemoData();
   const doctor = getCurrentProfile(state);
+  const normalizedStatus = String(doctor?.status || "").toLowerCase();
+  const isActive = ["active", "approved"].includes(normalizedStatus);
+  const isPending = ["pending_approval", "pending"].includes(normalizedStatus);
 
-  if (doctor?.status === "active") {
+  // Allow pending doctors to access workspace with restricted view
+  if (isActive || isPending) {
     return <Outlet />;
   }
 
+  // Block access for inactive/archived accounts
   return (
     <AppShell
       title="Doctor workspace unavailable"
-      subtitle="This account can sign in, but the clinic has not enabled clinical access yet."
+      subtitle="This account is not active. Contact the clinic administrator for access."
       languageLabel="Doctor status in English"
     >
       <Card className="max-w-2xl">
         <CardHeader
           eyebrow="Account status"
-          title={doctor?.status === "pending_approval" ? "Pending admin approval" : "Access blocked"}
-          description={
-            doctor?.status === "pending_approval"
-              ? "Your doctor account has been created, but an admin still needs to approve it before the clinical queue and availability tools unlock."
-              : "This doctor account is inactive or archived. Contact the clinic administrator for access."
-          }
+          title="Access blocked"
+          description="This doctor account is inactive or archived. Contact the clinic administrator for access."
           actions={
             <Button asChild variant="secondary">
               <Link to="/auth">Back to auth</Link>

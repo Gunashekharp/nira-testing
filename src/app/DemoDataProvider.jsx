@@ -1,6 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { demoStore } from "../services/demoStore";
-import { downloadLabReportPdf, downloadPrescriptionPdf } from "../services/documentDownloads";
+import { demoStore, STORAGE_KEY } from "../services/demoStore";
 
 const DemoDataContext = createContext(null);
 
@@ -20,6 +19,35 @@ export function DemoDataProvider({ children }) {
 
     return () => {
       mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    function handleStorage(event) {
+      if (event.key !== STORAGE_KEY) {
+        return;
+      }
+
+      demoStore.getState().then((snapshot) => {
+        setState(snapshot);
+      });
+    }
+
+    function handleLocalDemoWrite() {
+      demoStore.getState().then((snapshot) => {
+        setState(snapshot);
+      });
+    }
+
+    window.addEventListener("storage", handleStorage);
+    window.addEventListener("nira-demo-state-updated", handleLocalDemoWrite);
+    return () => {
+      window.removeEventListener("storage", handleStorage);
+      window.removeEventListener("nira-demo-state-updated", handleLocalDemoWrite);
     };
   }, []);
 
@@ -50,19 +78,19 @@ export function DemoDataProvider({ children }) {
           return snapshot;
         },
         async signupPatient(payload) {
-          const snapshot = await demoStore.signupPatient(payload);
-          setState(snapshot);
-          return snapshot;
+          const result = await demoStore.signupPatient(payload);
+          setState(result.snapshot);
+          return result;
         },
         async signupDoctor(payload) {
-          const snapshot = await demoStore.signupDoctor(payload);
-          setState(snapshot);
-          return snapshot;
+          const result = await demoStore.signupDoctor(payload);
+          setState(result.snapshot);
+          return result;
         },
         async signupAdmin(payload) {
-          const snapshot = await demoStore.signupAdmin(payload);
-          setState(snapshot);
-          return snapshot;
+          const result = await demoStore.signupAdmin(payload);
+          setState(result.snapshot);
+          return result;
         },
         async updateCurrentProfile(payload) {
           const snapshot = await demoStore.updateCurrentProfile(payload);
@@ -76,8 +104,18 @@ export function DemoDataProvider({ children }) {
           setState(snapshot);
           return snapshot;
         },
+        async submitPrecheckResponses(appointmentId, payload) {
+          const snapshot = await demoStore.submitPrecheckResponses(appointmentId, payload);
+          setState(snapshot);
+          return snapshot;
+        },
         async submitInterview(appointmentId, payload) {
           const snapshot = await demoStore.submitInterview(appointmentId, payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async syncChatbotSubmission(payload) {
+          const snapshot = await demoStore.syncChatbotSubmission(payload);
           setState(snapshot);
           return snapshot;
         },
@@ -113,45 +151,35 @@ export function DemoDataProvider({ children }) {
           setState(snapshot);
           return snapshot;
         },
+        async updatePrecheckQuestions(appointmentId, payload) {
+          const snapshot = await demoStore.updatePrecheckQuestions(appointmentId, payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async sendPrecheckToPatient(appointmentId) {
+          const snapshot = await demoStore.sendPrecheckToPatient(appointmentId);
+          setState(snapshot);
+          return snapshot;
+        },
+        async regeneratePrecheckQuestions(appointmentId) {
+          const snapshot = await demoStore.regeneratePrecheckQuestions(appointmentId);
+          setState(snapshot);
+          return snapshot;
+        },
         async approveEncounter(appointmentId, payload) {
           const snapshot = await demoStore.approveEncounter(appointmentId, payload);
           setState(snapshot);
           return snapshot;
         },
-        async sendLabOrder(appointmentId, payload) {
-          const snapshot = await demoStore.sendLabOrder(appointmentId, payload);
-          setState(snapshot);
-          return snapshot;
-        },
-        async updateLabOrder(labOrderId, payload) {
-          const snapshot = await demoStore.updateLabOrder(labOrderId, payload);
-          setState(snapshot);
-          return snapshot;
-        },
-        async cancelLabOrder(labOrderId) {
-          const snapshot = await demoStore.cancelLabOrder(labOrderId);
-          setState(snapshot);
-          return snapshot;
-        },
-        async markSampleReceived(labOrderId) {
-          const snapshot = await demoStore.markSampleReceived(labOrderId);
+        async upsertLabReport(appointmentId, payload) {
+          const snapshot = await demoStore.upsertLabReport(appointmentId, payload);
           setState(snapshot);
           return snapshot;
         }
       },
-      lab: {
-        async markSampleReceived(labOrderId) {
-          const snapshot = await demoStore.markSampleReceived(labOrderId);
-          setState(snapshot);
-          return snapshot;
-        },
-        async startLabOrder(labOrderId) {
-          const snapshot = await demoStore.startLabOrder(labOrderId);
-          setState(snapshot);
-          return snapshot;
-        },
-        async completeLabOrder(labOrderId, payload) {
-          const snapshot = await demoStore.completeLabOrder(labOrderId, payload);
+      nurse: {
+        async saveVitals(appointmentId, payload) {
+          const snapshot = await demoStore.saveNurseVitals(appointmentId, payload);
           setState(snapshot);
           return snapshot;
         }
@@ -162,23 +190,18 @@ export function DemoDataProvider({ children }) {
           setState(snapshot);
           return snapshot;
         },
-        async updatePatient(patientId, payload) {
-          const snapshot = await demoStore.updatePatient(patientId, payload);
-          setState(snapshot);
-          return snapshot;
-        },
-        async archivePatient(patientId) {
-          const snapshot = await demoStore.archivePatient(patientId);
-          setState(snapshot);
-          return snapshot;
-        },
-        async restorePatient(patientId) {
-          const snapshot = await demoStore.restorePatient(patientId);
-          setState(snapshot);
-          return snapshot;
-        },
         async addDoctor(payload) {
           const snapshot = await demoStore.addDoctor(payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async addAdmin(payload) {
+          const snapshot = await demoStore.addAdmin(payload);
+          setState(snapshot);
+          return snapshot;
+        },
+        async updatePatient(patientId, payload) {
+          const snapshot = await demoStore.updatePatient(patientId, payload);
           setState(snapshot);
           return snapshot;
         },
@@ -207,6 +230,11 @@ export function DemoDataProvider({ children }) {
           setState(snapshot);
           return snapshot;
         },
+        async deletePatient(patientId) {
+          const snapshot = await demoStore.deletePatient(patientId);
+          setState(snapshot);
+          return snapshot;
+        },
         async updateDoctorAvailability(doctorId, payload) {
           const snapshot = await demoStore.updateDoctorAvailability(doctorId, payload);
           setState(snapshot);
@@ -228,45 +256,16 @@ export function DemoDataProvider({ children }) {
           return snapshot;
         }
       },
-      documents: {
-        downloadPrescription(prescriptionId) {
-          if (!state) {
-            return false;
-          }
-
-          const prescription = state.prescriptions.byId[prescriptionId];
-          if (!prescription) {
-            return false;
-          }
-
-          return downloadPrescriptionPdf({
-            prescription,
-            patient: state.patients.byId[prescription.patientId],
-            doctor: state.doctors.byId[prescription.doctorId]
-          });
-        },
-        downloadLabReport(labReportId) {
-          if (!state) {
-            return false;
-          }
-
-          const report = state.labReports.byId[labReportId];
-          if (!report) {
-            return false;
-          }
-
-          const order = state.labOrders.byId[report.labOrderId];
-          return downloadLabReportPdf({
-            report,
-            order,
-            patient: state.patients.byId[report.patientId],
-            doctor: state.doctors.byId[report.doctorId]
-          });
+      notifications: {
+        async markAsRead(notificationId) {
+          const snapshot = await demoStore.markNotificationAsRead(notificationId);
+          setState(snapshot);
+          return snapshot;
         }
       },
       refresh
     }),
-    [state]
+    []
   );
 
   const value = useMemo(

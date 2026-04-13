@@ -6,32 +6,34 @@ import { Card, CardHeader } from "../../components/ui/Card";
 import { StatCard } from "../../components/ui/StatCard";
 import { useDemoData } from "../../app/DemoDataProvider";
 import { getAdminWorkspace } from "../shared/selectors";
+import { useTranslation } from "../../hooks/useTranslation";
 
 export function AdminDashboardPage() {
   const { state, actions } = useDemoData();
+  const { t } = useTranslation();
   const { counts, pendingDoctors, appointments } = getAdminWorkspace(state);
 
   return (
     <AppShell
-      title="Admin console"
-      subtitle="Operate the clinic from one place: approve doctors, maintain availability, and manage appointment flow."
+      title={t("adminConsole")}
+      subtitle={t("operateClinic")}
       languageLabel="Admin UI in English"
     >
       <div className="space-y-6">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
-          <StatCard label="Doctors" value={`${counts.doctors}`} tone="accent" />
-          <StatCard label="Pending approvals" value={`${counts.pendingDoctors}`} tone="soft" />
-          <StatCard label="Patients" value={`${counts.patients}`} />
-          <StatCard label="Appointments" value={`${counts.appointments}`} />
-          <StatCard label="Lab requests" value={`${counts.labOrders}`} />
+          <StatCard label={t("admins")} value={`${counts.admins}`} tone="accent" to="/admin/admins" />
+          <StatCard label={t("doctors")} value={`${counts.doctors}`} tone="accent" to="/admin/doctors" />
+          <StatCard label={t("pendingApprovals")} value={`${counts.pendingDoctors}`} tone="soft" to="/admin/doctors?status=pending_approval" />
+          <StatCard label={t("patients")} value={`${counts.patients}`} to="/admin/patients" />
+          <StatCard label={t("appointments")} value={`${counts.appointments}`} to="/admin/appointments?status=active" />
         </div>
 
         <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
           <Card>
             <CardHeader
-              eyebrow="Pending doctor approvals"
-              title={pendingDoctors.length ? "Approval queue" : "No approvals waiting"}
-              description="Public doctor signups land here until an admin activates them."
+              eyebrow={t("pendingApprovals")}
+              title={pendingDoctors.length ? t("approvalQueue") : t("noApprovalsWaiting")}
+              description={t("publicDoctorSignups")}
             />
             <div className="space-y-3">
               {pendingDoctors.map((doctor) => (
@@ -43,11 +45,11 @@ export function AdminDashboardPage() {
                         {doctor.specialty} · {doctor.licenseNumber}
                       </div>
                     </div>
-                    <Badge tone="warning">Pending</Badge>
+                    <Badge tone="warning">{t("pending")}</Badge>
                   </div>
                   <div className="mt-4 flex flex-wrap gap-3">
                     <Button size="sm" onClick={() => actions.admin.approveDoctor(doctor.id)}>
-                      Approve
+                      {t("approve")}
                     </Button>
                     <Button size="sm" variant="secondary" onClick={() => actions.admin.rejectDoctor(doctor.id)}>
                       Reject
@@ -69,7 +71,11 @@ export function AdminDashboardPage() {
               title="Operational workspaces"
               description="Use the focused pages below to manage doctors, appointments, and patient visibility."
             />
-            <div className="grid gap-4 md:grid-cols-3">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <Link to="/admin/admins" className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:shadow-soft">
+                <div className="text-base font-semibold text-ink">Admins</div>
+                <div className="mt-2 text-sm leading-6 text-muted">Create additional admin accounts for shared clinic operations.</div>
+              </Link>
               <Link to="/admin/doctors" className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:shadow-soft">
                 <div className="text-base font-semibold text-ink">Doctors</div>
                 <div className="mt-2 text-sm leading-6 text-muted">Add, edit, approve, deactivate, archive, and maintain schedules.</div>
@@ -80,7 +86,7 @@ export function AdminDashboardPage() {
               </Link>
               <Link to="/admin/patients" className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:shadow-soft">
                 <div className="text-base font-semibold text-ink">Patients</div>
-                <div className="mt-2 text-sm leading-6 text-muted">Add, edit, archive, and restore patients with profile and lab context.</div>
+                <div className="mt-2 text-sm leading-6 text-muted">Browse the read-only patient directory with optional profile fields.</div>
               </Link>
             </div>
             <div className="mt-6 rounded-[24px] border border-line bg-surface-2 p-5 text-sm text-muted">

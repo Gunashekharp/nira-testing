@@ -72,7 +72,7 @@ export function getScheduleOverride(state, doctorId, date) {
 export function getRoleCollectionKey(role) {
   if (role === "patient") return "patients";
   if (role === "doctor") return "doctors";
-  if (role === "lab") return "labs";
+  if (role === "nurse") return "nurses";
   return "admins";
 }
 

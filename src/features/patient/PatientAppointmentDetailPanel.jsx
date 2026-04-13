@@ -5,16 +5,15 @@ import {
   ArrowLeft,
   CalendarClock,
   CheckCircle2,
-  ClipboardList,
   FileText,
-  MessageSquareHeart,
-  Microscope,
-  ShieldCheck
+  ShieldCheck,
+  TestTube
 } from "lucide-react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card, CardHeader } from "../../components/ui/Card";
 import { formatDate, formatStatus, formatTime } from "../../lib/format";
+import { getPatientReschedulePath } from "../shared/selectors";
 
 function getJourneyTone(bucket) {
   if (bucket === "action") {
@@ -29,6 +28,10 @@ function getJourneyTone(bucket) {
     return "success";
   }
 
+  if (bucket === "missed") {
+    return "danger";
+  }
+
   if (bucket === "cancelled") {
     return "danger";
   }
@@ -37,8 +40,8 @@ function getJourneyTone(bucket) {
 }
 
 function buildTimeline(appointment) {
-  const interviewDone = appointment.interview?.completionStatus === "complete";
-  const reviewStarted = ["ai_ready", "in_consult", "approved"].includes(appointment.encounterStatus);
+  const precheckDone = appointment.precheckQuestionnaire?.status === "completed";
+  const reviewStarted = ["ai_ready", "in_consult", "approved"].includes(appointment.encounterStatus) || appointment.encounterStatus === "review";
   const prescriptionReady = appointment.canViewPrescription;
 
   return [
@@ -48,14 +51,14 @@ function buildTimeline(appointment) {
       active: true
     },
     {
-      label: "Interview",
-      description: interviewDone ? "AI intake completed and sent to doctor." : "AI interview still needs attention.",
-      active: interviewDone,
-      current: appointment.encounterStatus === "awaiting_interview"
+      label: "Chat intake",
+      description: precheckDone ? "Your chat answers are submitted and visible to doctor." : "Please complete pending chat questions.",
+      active: precheckDone,
+      current: appointment.precheckQuestionnaire?.status === "sent_to_patient" || appointment.encounterStatus === "awaiting_interview"
     },
     {
       label: "Doctor review",
-      description: reviewStarted ? "Doctor is reviewing or has reviewed the draft." : "Doctor review starts after intake.",
+      description: reviewStarted ? "Doctor is reviewing or has reviewed the summary." : "Doctor review starts after chat intake.",
       active: reviewStarted,
       current: ["ai_ready", "in_consult"].includes(appointment.encounterStatus)
     },
@@ -68,27 +71,6 @@ function buildTimeline(appointment) {
   ];
 }
 
-function LabProgressPipeline({ order }) {
-  return (
-    <div className="mt-4 grid gap-2 sm:grid-cols-4">
-      {order.progress.map((step) => (
-        <div
-          key={`${order.id}-${step.key}`}
-          className={`rounded-2xl border px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] ${
-            step.done
-              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-              : step.current
-                ? "border-cyan-200 bg-cyan-50 text-cyan-900"
-                : "border-line bg-white text-muted"
-          }`}
-        >
-          {step.label}
-        </div>
-      ))}
-    </div>
-  );
-}
-
 export function PatientAppointmentDetailPanel({
   appointment,
   onCancel,
@@ -97,7 +79,8 @@ export function PatientAppointmentDetailPanel({
 }) {
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [submittingCancel, setSubmittingCancel] = useState(false);
-  const timeline = useMemo(() => buildTimeline(appointment), [appointment]);
+  const timeline = useMemo(() => (appointment ? buildTimeline(appointment) : []), [appointment]);
+  const reschedulePath = appointment ? getPatientReschedulePath(appointment) : "/patient/booking";
 
   useEffect(() => {
     if (appointment?.bookingStatus === "cancelled") {
@@ -126,14 +109,14 @@ export function PatientAppointmentDetailPanel({
         <CardHeader
           eyebrow="Appointment detail"
           title="Select an appointment"
-          description="Choose an item from the left list to see visit status, interview progress, and prescription outcome."
+          description="Choose an item from the left list to see visit status, care progress, and prescription outcome."
         />
       </Card>
     );
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-4">
       {showBackToList ? (
         <div className="lg:hidden">
           <Button asChild variant="secondary">
@@ -146,7 +129,7 @@ export function PatientAppointmentDetailPanel({
       ) : null}
 
       {showCancelledNotice && appointment.bookingStatus === "cancelled" ? (
-        <div className="rounded-[24px] border border-amber-200 bg-amber-50 p-5">
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
           <div className="flex items-start gap-3">
             <CheckCircle2 className="mt-1 h-5 w-5 text-amber-700" />
             <div>
@@ -159,32 +142,46 @@ export function PatientAppointmentDetailPanel({
         </div>
       ) : null}
 
-      <Card>
+      {appointment.journeyBucket === "missed" ? (
+        <div className="rounded-xl border border-rose-200 bg-rose-50 p-4">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="mt-1 h-5 w-5 text-rose-700" />
+            <div>
+              <div className="text-sm font-semibold text-rose-950">Appointment missed</div>
+              <div className="mt-1 text-sm leading-6 text-rose-900/90">
+                This timeslot has already passed, so it is no longer treated as an upcoming visit. You can pick a fresh slot with the same doctor right away.
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <Card density="compact" variant="gradientElevated">
         <CardHeader
           eyebrow="Visit summary"
           title={appointment.doctor?.fullName || "Assigned doctor"}
           description={`${formatDate(appointment.startAt)} at ${formatTime(appointment.startAt)} | Token ${appointment.token}`}
           actions={<Badge tone={getJourneyTone(appointment.journeyBucket)}>{appointment.journeyLabel}</Badge>}
         />
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <div className="rounded-[22px] border border-line bg-surface-2 p-4 text-sm">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-xl border border-line bg-surface-2 p-3.5 text-sm">
             <div className="section-title">Doctor</div>
             <div className="mt-2 font-semibold text-ink">{appointment.doctor?.fullName}</div>
             <div className="mt-1 text-muted">{appointment.doctor?.specialty}</div>
           </div>
-          <div className="rounded-[22px] border border-line bg-surface-2 p-4 text-sm">
+          <div className="rounded-xl border border-line bg-surface-2 p-3.5 text-sm">
             <div className="section-title">Slot</div>
             <div className="mt-2 font-semibold text-ink">
               {formatTime(appointment.startAt)} - {formatTime(appointment.endAt)}
             </div>
             <div className="mt-1 text-muted">{formatDate(appointment.startAt)}</div>
           </div>
-          <div className="rounded-[22px] border border-line bg-surface-2 p-4 text-sm">
+          <div className="rounded-xl border border-line bg-surface-2 p-3.5 text-sm">
             <div className="section-title">Booking status</div>
             <div className="mt-2 font-semibold text-ink">{formatStatus(appointment.bookingStatus)}</div>
             <div className="mt-1 text-muted">Encounter: {formatStatus(appointment.encounterStatus)}</div>
           </div>
-          <div className="rounded-[22px] border border-line bg-surface-2 p-4 text-sm">
+          <div className="rounded-xl border border-line bg-surface-2 p-3.5 text-sm">
             <div className="section-title">Visit type</div>
             <div className="mt-2 font-semibold text-ink">{formatStatus(appointment.visitType)}</div>
             <div className="mt-1 text-muted">Token {appointment.token}</div>
@@ -192,32 +189,14 @@ export function PatientAppointmentDetailPanel({
         </div>
       </Card>
 
-      <Card>
+      <Card density="compact">
         <CardHeader
           eyebrow="What happens now"
           title={appointment.nextAction.label}
           description={appointment.nextAction.description}
         />
         <div className="flex flex-wrap gap-3">
-          {appointment.canStartInterview ? (
-            <Button asChild>
-              <Link to={`/patient/interview/${appointment.id}`}>
-                <MessageSquareHeart className="h-4 w-4" />
-                Start AI interview
-              </Link>
-            </Button>
-          ) : null}
-
-          {!appointment.canStartInterview && appointment.canViewInterview ? (
-            <Button asChild>
-              <a href="#interview-summary">
-                <ClipboardList className="h-4 w-4" />
-                View interview summary
-              </a>
-            </Button>
-          ) : null}
-
-          {!appointment.canStartInterview && !appointment.canViewInterview && appointment.canViewPrescription ? (
+          {appointment.canViewPrescription ? (
             <Button asChild>
               <Link to={`/patient/prescriptions/${appointment.prescriptionId}`}>
                 <FileText className="h-4 w-4" />
@@ -226,20 +205,20 @@ export function PatientAppointmentDetailPanel({
             </Button>
           ) : null}
 
-          {!appointment.canStartInterview && !appointment.canViewPrescription && appointment.canViewLabReport ? (
-            <Button asChild>
-              <Link to={`/patient/lab-reports/${appointment.latestCompletedLabOrder.id}`}>
-                <Microscope className="h-4 w-4" />
-                View lab report
+          {appointment.bookingStatus === "cancelled" ? (
+            <Button asChild variant="accent">
+              <Link to="/patient/booking">
+                <CalendarClock className="h-4 w-4" />
+                Book another appointment
               </Link>
             </Button>
           ) : null}
 
-          {appointment.bookingStatus === "cancelled" ? (
+          {appointment.journeyBucket === "missed" ? (
             <Button asChild variant="accent">
-              <Link to={`/patient/booking?doctorId=${appointment.doctorId}`}>
+              <Link to={reschedulePath}>
                 <CalendarClock className="h-4 w-4" />
-                Book another appointment
+                Reschedule with same doctor
               </Link>
             </Button>
           ) : null}
@@ -256,7 +235,7 @@ export function PatientAppointmentDetailPanel({
         </div>
 
         {confirmingCancel && appointment.canCancel ? (
-          <div className="mt-5 rounded-[24px] border border-amber-200 bg-amber-50 p-5">
+          <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
             <div className="text-sm font-semibold text-amber-950">Confirm cancellation</div>
             <div className="mt-2 text-sm leading-6 text-amber-900/90">
               This will remove the visit from your active appointment flow and release the slot back into booking.
@@ -273,45 +252,8 @@ export function PatientAppointmentDetailPanel({
         ) : null}
       </Card>
 
-      <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-        <Card>
-          <CardHeader
-            eyebrow="Interview status"
-            title={appointment.interviewState.label}
-            description={appointment.interviewState.description}
-          />
-          <div id="interview-summary" className="space-y-4">
-            {appointment.interview?.transcript?.length ? (
-              <>
-                <div className="flex flex-wrap gap-2">
-                  {(appointment.interview.extractedFindings || []).map((finding) => (
-                    <span key={finding} className="pill">
-                      {finding}
-                    </span>
-                  ))}
-                </div>
-                <div className="space-y-3">
-                  {appointment.interview.transcript.slice(0, 4).map((entry, index) => (
-                    <div
-                      key={`${entry.role}-${index}`}
-                      className={`rounded-2xl px-4 py-3 text-sm ${
-                        entry.role === "ai" ? "bg-surface-2 text-muted" : "bg-brand-mint text-brand-midnight"
-                      }`}
-                    >
-                      {entry.text}
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <div className="rounded-[22px] border border-dashed border-line bg-surface-2 p-5 text-sm text-muted">
-                No interview answers have been submitted yet for this appointment.
-              </div>
-            )}
-          </div>
-        </Card>
-
-        <Card>
+      <div className="grid gap-4">
+        <Card density="compact">
           <CardHeader
             eyebrow="Care progress"
             title={appointment.journeyLabel}
@@ -321,7 +263,7 @@ export function PatientAppointmentDetailPanel({
             {timeline.map((step) => (
               <div
                 key={step.label}
-                className={`rounded-[22px] border p-4 ${
+                className={`rounded-xl border p-3.5 ${
                   step.active
                     ? "border-emerald-200 bg-emerald-50"
                     : step.current
@@ -350,43 +292,49 @@ export function PatientAppointmentDetailPanel({
             ))}
 
             {appointment.bookingStatus === "cancelled" ? (
-              <div className="rounded-[22px] border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3.5 text-sm text-amber-900">
                 This appointment is now read-only history. If you still need care, you can book a fresh slot.
+              </div>
+            ) : appointment.journeyBucket === "missed" ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 p-3.5 text-sm text-rose-900">
+                This visit was missed, so the active care flow stopped here. Use the reschedule action above to pick a new slot with the same doctor.
               </div>
             ) : null}
           </div>
         </Card>
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1fr_0.9fr]">
-        <Card>
+      <div className="grid gap-4 xl:grid-cols-[1fr_0.9fr]">
+        <Card density="compact">
           <CardHeader
             eyebrow="Plain-language summary"
             title="What this means for you"
             description="A simple explanation of the current state so patients do not need to decode clinical workflow."
           />
-          <div className="rounded-[22px] border border-line bg-surface-2 p-5 text-sm leading-7 text-muted">
+          <div className="rounded-xl border border-line bg-surface-2 p-4 text-sm leading-6 text-muted">
             {appointment.journeyBucket === "action"
-              ? "Please complete the AI interview before the doctor begins review. This helps the doctor see your symptoms in a structured draft."
+              ? "Please continue in chatbot to complete the pending care questions before doctor review starts."
               : appointment.journeyBucket === "review"
-                ? "Your interview has already been submitted. The doctor is now reviewing or validating the information before final approval."
+                ? "Your chat intake details are already shared. The doctor is now reviewing or validating the information before final approval."
                 : appointment.journeyBucket === "completed"
                   ? "This visit has been completed and the approved prescription is available in your portal."
+                  : appointment.journeyBucket === "missed"
+                    ? "This visit was missed, so it has been moved out of the upcoming queue. Reschedule it with the same doctor to continue care."
                   : appointment.journeyBucket === "cancelled"
                     ? "This visit is cancelled and kept only for history. It will no longer move forward in the workflow."
                     : "Your appointment is booked. If needed, you can still review details or cancel before completion."}
           </div>
         </Card>
 
-        <Card>
+        <Card density="compact">
           <CardHeader
             eyebrow="Prescription status"
             title={appointment.canViewPrescription ? "Ready to view" : "Awaiting doctor approval"}
-            description="Prescriptions only appear after doctor approval, even when the AI interview is already complete."
+            description="Prescriptions only appear after doctor approval, even when the pre-check is already complete."
           />
           {appointment.canViewPrescription ? (
             <div className="space-y-4">
-              <div className="rounded-[22px] border border-emerald-200 bg-emerald-50 p-5">
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
                 <div className="flex items-start gap-3">
                   <ShieldCheck className="mt-1 h-5 w-5 text-emerald-700" />
                   <div>
@@ -405,53 +353,66 @@ export function PatientAppointmentDetailPanel({
               </Button>
             </div>
           ) : (
-            <div className="rounded-[22px] border border-dashed border-line bg-surface-2 p-5 text-sm text-muted">
+            <div className="rounded-xl border border-dashed border-line bg-surface-2 p-4 text-sm text-muted">
               No approved prescription yet. The doctor will publish it after validating the encounter.
             </div>
           )}
         </Card>
-      </div>
 
-      <Card>
-        <CardHeader
-          eyebrow="Lab tests"
-          title={appointment.latestLabOrder ? appointment.latestLabOrder.patientStatusLabel : "No lab request yet"}
-          description="If the doctor requests tests, you will see whether the sample is still pending, already given, or fully completed."
-        />
-        {appointment.labOrders?.length ? (
-          <div className="space-y-4">
-            {appointment.labOrders.map((order) => (
-              <div key={order.id} className="rounded-[24px] border border-line bg-surface-2 p-5">
-                <div className="flex flex-wrap items-center justify-between gap-3">
+        <Card density="compact">
+          <CardHeader
+            eyebrow="Investigations"
+            title={appointment.canViewTests ? "Tests ordered" : "No tests ordered"}
+            description="Tests your doctor selected during the visit appear here after approval."
+          />
+          {appointment.canViewTests && appointment.testOrder ? (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4">
+                <div className="flex items-start gap-3">
+                  <TestTube className="mt-1 h-5 w-5 text-cyan-700" />
                   <div>
-                    <div className="text-base font-semibold text-ink">{order.tests.map((test) => test.name).join(", ")}</div>
-                    <div className="mt-2 text-sm text-muted">
-                      Requested on {formatDate(order.orderedAt)} | Status {order.patientStatusLabel}
+                    <div className="text-sm font-semibold text-cyan-950">
+                      {appointment.testOrder.tests?.length || 0} test{(appointment.testOrder.tests?.length || 0) === 1 ? "" : "s"} ordered
+                    </div>
+                    <div className="mt-1 text-sm text-cyan-900/90">
+                      Ordered on {formatDate(appointment.testOrder.orderedAt)} by {appointment.testOrder.doctorName || "your doctor"}.
                     </div>
                   </div>
-                  <Badge tone={order.tone}>{order.patientStatusLabel}</Badge>
-                </div>
-                {order.clinicianNote ? (
-                  <div className="mt-4 text-sm leading-6 text-muted">{order.clinicianNote}</div>
-                ) : null}
-                <LabProgressPipeline order={order} />
-                <div className="mt-4 flex flex-wrap gap-3">
-                  <Button asChild variant="secondary">
-                    <Link to={`/patient/lab-reports/${order.id}`}>
-                      <Microscope className="h-4 w-4" />
-                      {order.report ? "Open report" : "Open request"}
-                    </Link>
-                  </Button>
                 </div>
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-5 text-sm text-muted">
-            No lab request has been created for this appointment yet.
-          </div>
-        )}
-      </Card>
+
+              {appointment.testOrder.tests?.length > 0 ? (
+                <ul className="space-y-2">
+                  {appointment.testOrder.tests.map((name) => (
+                    <li key={name} className="flex items-start gap-2 rounded-xl border border-line bg-surface-2 px-4 py-3 text-sm text-ink">
+                      <span className="mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-brand-sky" />
+                      {name}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {appointment.testOrder.patientNote ? (
+                <div className="rounded-xl border border-line bg-surface-2 p-4 text-sm text-ink">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted">Doctor instructions</div>
+                  <p className="mt-1 whitespace-pre-wrap">{appointment.testOrder.patientNote}</p>
+                </div>
+              ) : null}
+
+              <Button asChild variant="secondary">
+                <Link to="/patient/tests">
+                  <TestTube className="h-4 w-4" />
+                  View all tests
+                </Link>
+              </Button>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-dashed border-line bg-surface-2 p-4 text-sm text-muted">
+              No tests ordered for this visit. If your doctor selects investigations, they will appear here after approval.
+            </div>
+          )}
+        </Card>
+      </div>
     </div>
   );
 }

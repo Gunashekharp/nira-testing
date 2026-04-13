@@ -1,4 +1,5 @@
 import { screen } from "@testing-library/react";
+import { within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderApp } from "./testUtils";
 
@@ -12,9 +13,10 @@ test("doctor can log in, review a chart, and approve a prescription", async () =
   await user.click(screen.getByRole("button", { name: /^login$/i }));
 
   expect(await screen.findByText("Doctor validation workspace")).toBeInTheDocument();
-  await user.click(await screen.findByRole("link", { name: /aasha verma/i }));
+  const aashaRow = await screen.findByRole("row", { name: /aasha verma/i });
+  await user.click(within(aashaRow).getByRole("link", { name: /open/i }));
 
-  expect(await screen.findByText("Unified EMR validation")).toBeInTheDocument();
+  expect(await screen.findByText("Unified EMR")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: /approve and publish rx/i }));
 
   expect(await screen.findByText("Prescription issued")).toBeInTheDocument();

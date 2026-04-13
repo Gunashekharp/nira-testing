@@ -1,387 +1,544 @@
+import { useMemo } from "react";
+import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import {
-  Activity,
-  ArrowRight,
+  Calendar,
   CalendarClock,
-  ClipboardList,
-  FileText,
-  Microscope,
-  ShieldCheck,
-  UserRound
+  ChevronRight,
+  FileDown,
+  List,
+  HeartPulse,
+  MessageCircle,
+  Pill,
+  Sparkles,
+  Stethoscope,
+  LinkIcon,
+  Check,
+  TestTube
 } from "lucide-react";
 import { AppShell } from "../../components/layout/AppShell";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
-import { Card, CardHeader } from "../../components/ui/Card";
-import { LanguageToggle } from "../../components/ui/LanguageToggle";
+import { Card } from "../../components/ui/Card";
 import { useDemoData } from "../../app/DemoDataProvider";
 import { getPatientWorkspace } from "../shared/selectors";
-import { formatDate, formatStatus, formatTime } from "../../lib/format";
-import { usePatientLanguage } from "./usePatientLanguage";
-
-const copy = {
-  en: {
-    title: "Patient dashboard",
-    subtitle:
-      "A cleaner care workspace for appointments, pending AI interviews, doctor review, and approved prescriptions.",
-    nextStep: "Next step",
-    actionHub: "Your care flow at a glance",
-    actionBody:
-      "Open the most important visit task first, then review every appointment in a structured appointment center.",
-    appointments: "All appointments",
-    book: "Book appointment",
-    prescriptions: "Prescriptions",
-    labReports: "Lab reports",
-    profile: "Profile",
-    profileCompleteness: "Profile completeness",
-    recentRx: "Recent prescriptions",
-    noPrescription: "Approved prescriptions will appear here after doctor validation.",
-    focusVisit: "Focus visit",
-    noVisit: "No active visits yet",
-    noVisitBody: "Book a live slot to start a new visit journey in the patient workspace."
-  },
-  hi: {
-    title: "Patient dashboard",
-    subtitle:
-      "A cleaner care workspace for appointments, pending AI interviews, doctor review, and approved prescriptions.",
-    nextStep: "Next step",
-    actionHub: "Your care flow at a glance",
-    actionBody:
-      "Open the most important visit task first, then review every appointment in a structured appointment center.",
-    appointments: "All appointments",
-    book: "Book appointment",
-    prescriptions: "Prescriptions",
-    labReports: "Lab reports",
-    profile: "Profile",
-    profileCompleteness: "Profile completeness",
-    recentRx: "Recent prescriptions",
-    noPrescription: "Approved prescriptions will appear here after doctor validation.",
-    focusVisit: "Focus visit",
-    noVisit: "No active visits yet",
-    noVisitBody: "Book a live slot to start a new visit journey in the patient workspace."
-  }
-};
-
-const bucketCards = [
-  {
-    bucket: "upcoming",
-    label: "Upcoming",
-    description: "Booked visits that are still active.",
-    tone: "neutral",
-    icon: CalendarClock
-  },
-  {
-    bucket: "action",
-    label: "Action needed",
-    description: "Visits that still need the AI interview.",
-    tone: "warning",
-    icon: ClipboardList
-  },
-  {
-    bucket: "review",
-    label: "In review",
-    description: "Your interview is with the doctor for validation.",
-    tone: "info",
-    icon: Activity
-  },
-  {
-    bucket: "completed",
-    label: "Completed / prescriptions",
-    description: "Finished visits with approved outputs.",
-    tone: "success",
-    icon: ShieldCheck
-  }
-];
-
-const labSummaryCards = [
-  {
-    label: "Total lab tests",
-    countKey: "total",
-    description: "Every active or completed test request in one place.",
-    to: "/patient/lab-reports?bucket=total"
-  },
-  {
-    label: "Yet to visit",
-    countKey: "yetToVisit",
-    description: "Tests requested by the doctor that still need your sample visit.",
-    to: "/patient/lab-reports?bucket=yet_to_visit"
-  },
-  {
-    label: "Sample given",
-    countKey: "sampleGiven",
-    description: "Samples already shared and moving through the lab workflow.",
-    to: "/patient/lab-reports?bucket=sample_given"
-  },
-  {
-    label: "Completed",
-    countKey: "completed",
-    description: "Reports published and ready to open or download.",
-    to: "/patient/lab-reports?bucket=completed"
-  }
-];
+import { formatDate, formatTime } from "../../lib/format";
+import { getTodayDayKey } from "../../lib/schedule";
+import { useTranslation } from "../../hooks/useTranslation";
 
 export function PatientHomePage() {
   const { state } = useDemoData();
+  const { t } = useTranslation();
   const {
     patient,
+    appointments,
     appointmentsByBucket,
     bucketCounts,
     prescriptions,
-    labOrders,
-    labCounts,
-    nextRecommendedAction
+    testOrders,
+    unreadNotificationCount,
+    nextAppointment,
+    pendingPrecheckQuestionnaire
   } = getPatientWorkspace(state);
-  const [language, setLanguage] = usePatientLanguage(patient?.preferredLanguage || "en");
-  const content = copy[language];
-  const focusVisit =
-    appointmentsByBucket.action[0] ||
-    appointmentsByBucket.review[0] ||
-    appointmentsByBucket.upcoming[0] ||
-    appointmentsByBucket.completed[0] ||
-    null;
+  const today = getTodayDayKey();
+  const todayAppointments = useMemo(
+    () =>
+      appointments.filter(
+        (item) =>
+          item.startAt?.slice(0, 10) === today &&
+          !["cancelled", "completed"].includes(item.bookingStatus) &&
+          item.journeyBucket !== "missed"
+      ),
+    [appointments, today]
+  );
 
-  const profileSignals = [
-    patient?.age ? "Age added" : "Age optional",
-    patient?.gender ? "Gender added" : "Gender optional",
-    patient?.city ? "City added" : "City optional",
-    patient?.abhaNumber ? "ABHA linked" : "ABHA optional"
+  const quickActions = [
+    {
+      label: t("bookAppt"),
+      icon: CalendarClock,
+      to: "/patient/booking",
+      description: t("bookAppt30s")
+    },
+    {
+      label: t("myRx"),
+      icon: Pill,
+      to: "/patient/prescriptions",
+      description: t("openLatestPdf")
+    },
+    {
+      label: t("myAppts"),
+      icon: List,
+      to: "/patient/appointments",
+      description: t("trackAppts")
+    },
+    {
+      label: "My Tests",
+      icon: TestTube,
+      to: "/patient/tests",
+      description: testOrders.length ? `${testOrders.length} order${testOrders.length === 1 ? "" : "s"}` : "View ordered investigations"
+    }
   ];
 
+  const buckets = [
+    { key: "upcoming", label: t("upcomingAppts"), count: bucketCounts.upcoming + bucketCounts.action, tone: "neutral" },
+    { key: "review", label: "In review", count: bucketCounts.review, tone: "info" },
+    { key: "missed", label: "Missed", count: bucketCounts.missed, tone: "danger" },
+    { key: "completed", label: t("completed"), count: bucketCounts.completed, tone: "success" }
+  ];
+
+  const latestRx = prescriptions.slice(0, 2);
+  const latestVitals = useMemo(() => {
+    const withVitals = [...appointments]
+      .filter((item) => item?.encounter?.apciDraft?.vitals)
+      .sort((left, right) => new Date(right.startAt || 0) - new Date(left.startAt || 0));
+
+    return withVitals[0]?.encounter?.apciDraft?.vitals || null;
+  }, [appointments]);
+  const latestVitalsUpdatedLabel = useMemo(() => {
+    if (!latestVitals?.updatedAt) {
+      return "No recent sync";
+    }
+
+    return `Updated by ${latestVitals.updatedBy || "care team"} · ${formatTime(latestVitals.updatedAt)}`;
+  }, [latestVitals]);
+
+  const latestBloodPressureParts = useMemo(() => {
+    const match = String(latestVitals?.bloodPressure || "").match(/(\d+)\s*\/\s*(\d+)/);
+    if (!match) return null;
+
+    return {
+      systolic: Number(match[1]),
+      diastolic: Number(match[2])
+    };
+  }, [latestVitals?.bloodPressure]);
+
+  const latestPulseValue = useMemo(() => {
+    const match = String(latestVitals?.pulse || "").match(/(\d+(?:\.\d+)?)/);
+    return match ? Number(match[1]) : null;
+  }, [latestVitals?.pulse]);
+
+  const vitalsCards = useMemo(
+    () => [
+      {
+        label: "BP",
+        value: latestVitals?.bloodPressure || "Pending",
+        subtext: latestBloodPressureParts
+          ? `${latestBloodPressureParts.systolic} / ${latestBloodPressureParts.diastolic}`
+          : "No reading",
+        accent: "from-rose-500/15 via-rose-500/8 to-white",
+        bar: latestBloodPressureParts
+          ? Math.min(100, Math.max(25, latestBloodPressureParts.systolic - 40))
+          : 24,
+        live: Boolean(latestBloodPressureParts)
+      },
+      {
+        label: "Pulse",
+        value: latestVitals?.pulse || "Pending",
+        subtext: latestPulseValue ? `${latestPulseValue} bpm` : "No reading",
+        accent: "from-cyan-500/15 via-cyan-500/8 to-white",
+        bar: latestPulseValue ? Math.min(100, Math.max(20, latestPulseValue)) : 22,
+        live: Boolean(latestPulseValue)
+      }
+    ],
+    [latestVitals?.bloodPressure, latestVitals?.pulse, latestBloodPressureParts, latestPulseValue]
+  );
+
+  const hasRecentVitals = vitalsCards.some((item) => item.live);
+  const showPrecheck = nextAppointment && !["completed", "cancelled"].includes(nextAppointment.journeyBucket);
+
+  function openPrecheckChat() {
+    window.dispatchEvent(new CustomEvent("nira:open-precheck", {
+      detail: {
+        appointmentId: nextAppointment?.id,
+        doctorName: nextAppointment?.doctor?.fullName,
+        specialty: nextAppointment?.doctor?.specialty,
+        startAt: nextAppointment?.startAt,
+        hasDoctorQuestions: pendingPrecheckQuestionnaire?.status === "sent_to_patient"
+      }
+    }));
+  }
+
   return (
-    <AppShell title={content.title} subtitle={content.subtitle} languageLabel="Patient UI in English / Hindi">
+    <AppShell title={t("home")} subtitle="5-second access to booking, prescriptions, status, and profile.">
       <div className="space-y-6">
-        <div className="grid gap-6 xl:grid-cols-[1.12fr_0.88fr]">
-          <Card className="bg-brand-midnight text-white shadow-panel">
-            <CardHeader
-              eyebrow={content.nextStep}
-              title={nextRecommendedAction.label}
-              description={nextRecommendedAction.description}
-              actions={
-                <div className="flex flex-wrap items-center gap-3">
-                  <Badge tone="info">{patient?.fullName}</Badge>
-                  <Badge tone={patient?.abhaNumber ? "success" : "warning"}>
-                    {patient?.abhaNumber ? "ABHA linked" : "ABHA optional"}
-                  </Badge>
-                </div>
-              }
-            />
-            <div className="space-y-5">
-              <p className="max-w-2xl text-sm leading-7 text-white/80">{content.actionBody}</p>
-
-              {focusVisit ? (
-                <div className="rounded-[24px] border border-white/10 bg-white/10 p-5">
-                  <div className="section-title text-white/70">{content.focusVisit}</div>
-                  <div className="mt-3 text-lg font-semibold tracking-tight">{focusVisit.doctor?.fullName}</div>
-                  <div className="mt-1 text-sm text-white/75">
-                    {formatDate(focusVisit.startAt)} at {formatTime(focusVisit.startAt)} | Token {focusVisit.token}
-                  </div>
-                  <div className="mt-4">
-                    <Badge tone="info">{focusVisit.journeyLabel}</Badge>
-                  </div>
-                </div>
-              ) : (
-                <div className="rounded-[24px] border border-white/10 bg-white/10 p-5">
-                  <div className="text-base font-semibold">{content.noVisit}</div>
-                  <div className="mt-2 text-sm leading-6 text-white/75">{content.noVisitBody}</div>
-                </div>
-              )}
-
-              <div className="flex flex-wrap gap-3">
-                <Button asChild variant="accent" size="lg">
-                  <Link to={nextRecommendedAction.to}>
-                    {nextRecommendedAction.label}
-                    <ArrowRight className="h-4 w-4" />
-                  </Link>
-                </Button>
-                <Button asChild variant="secondary" size="lg">
-                  <Link to="/patient/appointments">{content.appointments}</Link>
-                </Button>
-                <Button asChild variant="ghost" size="lg" className="border border-white/15 text-white hover:bg-white/10">
-                  <Link to="/patient/booking">{content.book}</Link>
-                </Button>
-              </div>
+        <Card density="compact" className="animate-fade-in p-4 sm:p-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-tide">{t("dashboard")}</p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-tight text-ink">
+                {t("welcome")}, {patient?.fullName?.split(" ")[0] || "Patient"}
+              </h2>
+              <p className="mt-1.5 text-sm text-muted">Need anything? Start from the quick actions below.</p>
             </div>
-          </Card>
-
-          <Card>
-            <CardHeader
-              eyebrow={content.actionHub}
-              title={patient?.fullName}
-              description="Your language preference, linked ID state, and care summary stay visible here."
-              actions={<LanguageToggle value={language} onChange={setLanguage} />}
-            />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="rounded-[24px] border border-line bg-surface-2 p-5">
-                <div className="section-title">Current open visits</div>
-                <div className="mt-3 text-3xl font-semibold tracking-tight text-ink">
-                  {bucketCounts.action + bucketCounts.review + bucketCounts.upcoming}
-                </div>
-                <div className="mt-2 text-sm text-muted">Action needed, in review, and upcoming buckets combined.</div>
-              </div>
-              <div className="rounded-[24px] border border-line bg-surface-2 p-5">
-                <div className="section-title">Approved prescriptions</div>
-                <div className="mt-3 text-3xl font-semibold tracking-tight text-ink">{bucketCounts.completed}</div>
-                <div className="mt-2 text-sm text-muted">Completed visits with approved outputs ready to open.</div>
-              </div>
-              {labSummaryCards.map((item) => (
-                <Link key={item.label} to={item.to}>
-                  <div className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:bg-white hover:shadow-soft">
-                    <div className="section-title">{item.label}</div>
-                    <div className="mt-3 text-3xl font-semibold tracking-tight text-ink">{labCounts[item.countKey]}</div>
-                    <div className="mt-2 text-sm text-muted">{item.description}</div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-            <div className="mt-5 flex flex-wrap gap-3">
-              <Button asChild variant="secondary">
-                <Link to="/patient/prescriptions">{content.prescriptions}</Link>
-              </Button>
-              <Button asChild variant="secondary">
-                <Link to="/patient/lab-reports">{content.labReports}</Link>
-              </Button>
-              <Button asChild variant="secondary">
-                <Link to="/patient/profile">{content.profile}</Link>
-              </Button>
-            </div>
-          </Card>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {bucketCards.map((item) => (
-            <Link key={item.bucket} to={`/patient/appointments?bucket=${item.bucket}`}>
-              <div className="rounded-[24px] border border-line bg-white/85 p-5 transition hover:-translate-y-0.5 hover:bg-white hover:shadow-soft">
+            <Badge tone="info">{unreadNotificationCount} unread notifications</Badge>
+          </div>
+          <div className="mt-5 grid grid-cols-2 gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {quickActions.map((item) => (
+              <Link
+                key={item.label}
+                to={item.to}
+                className="patient-quick-action-card"
+                aria-label={item.label === t("bookAppt") ? "Booking" : undefined}
+              >
                 <div className="flex items-center justify-between gap-3">
-                  <item.icon className="h-5 w-5 text-brand-tide" />
-                  <Badge tone={item.tone}>{bucketCounts[item.bucket]}</Badge>
+                  <span className="icon-wrap icon-glow">
+                    <item.icon className="h-4 w-4" />
+                  </span>
+                  <ChevronRight className="h-4 w-4 opacity-80 icon-glow" />
                 </div>
-                <div className="mt-4 text-lg font-semibold tracking-tight text-ink">{item.label}</div>
-                <div className="mt-2 text-sm leading-6 text-muted">{item.description}</div>
-              </div>
-            </Link>
-          ))}
-        </div>
+                <div className="mt-3 text-sm font-semibold sm:text-base">{item.label}</div>
+                <div className="mt-1.5 text-xs opacity-90">{item.description}</div>
+              </Link>
+            ))}
+          </div>
+        </Card>
 
-        <div className="grid gap-6 xl:grid-cols-[1fr_0.9fr]">
-          <Card>
-            <CardHeader
-              eyebrow={content.focusVisit}
-              title={focusVisit ? focusVisit.journeyLabel : content.noVisit}
-              description={
-                focusVisit
-                  ? `${focusVisit.doctor?.fullName} | ${formatDate(focusVisit.startAt)} at ${formatTime(focusVisit.startAt)}`
-                  : content.noVisitBody
-              }
-            />
-            {focusVisit ? (
-              <div className="space-y-4">
-                <div className="rounded-[24px] border border-line bg-surface-2 p-5">
-                  <div className="grid gap-4 md:grid-cols-3">
-                    <div>
-                      <div className="section-title">Next action</div>
-                      <div className="mt-2 font-semibold text-ink">{focusVisit.nextAction.label}</div>
-                    </div>
-                    <div>
-                      <div className="section-title">Interview status</div>
-                      <div className="mt-2 font-semibold text-ink">{focusVisit.interviewState.label}</div>
-                    </div>
-                    <div>
-                      <div className="section-title">Booking status</div>
-                      <div className="mt-2 font-semibold text-ink">{formatStatus(focusVisit.bookingStatus)}</div>
-                    </div>
+        {showPrecheck && (
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.15, duration: 0.4 }}
+          >
+            <Card density="compact" className="relative overflow-hidden border-2 border-brand-sky/25 bg-gradient-to-br from-brand-sky/[0.04] via-white to-brand-mint/[0.06] animate-fade-in">
+              <div className="absolute -right-8 -top-8 h-28 w-28 rounded-full bg-brand-sky/[0.07] blur-2xl" />
+              <div className="absolute -left-6 bottom-0 h-20 w-20 rounded-full bg-brand-mint/10 blur-xl" />
+
+              <div className="relative">
+                <div className="flex items-start gap-4">
+                  <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-tide to-brand-sky shadow-lg shadow-brand-sky/25">
+                    <Stethoscope className="h-6 w-6 text-white" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-tide">Pre-Appointment Check</p>
+                    <h3 className="mt-1 text-lg font-semibold text-ink">Prepare for your visit</h3>
+                    <p className="mt-1.5 text-sm leading-relaxed text-muted">
+                      Answer a few quick questions before your appointment with{" "}
+                      <span className="font-semibold text-ink">{nextAppointment.doctor?.fullName || "your doctor"}</span>
+                      {nextAppointment.startAt && (
+                        <> on <span className="font-semibold text-ink">{formatDate(nextAppointment.startAt)}</span> at <span className="font-semibold text-ink">{formatTime(nextAppointment.startAt)}</span></>
+                      )}
+                      . This helps your doctor review your case beforehand.
+                    </p>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-3">
-                  <Button asChild>
-                    <Link to={`/patient/appointments/${focusVisit.id}?bucket=${focusVisit.journeyBucket}`}>
-                      Open visit detail
-                    </Link>
-                  </Button>
-                  <Button asChild variant="secondary">
-                    <Link to="/patient/appointments">All appointments</Link>
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <Button asChild>
-                <Link to="/patient/booking">{content.book}</Link>
-              </Button>
-            )}
-          </Card>
 
-          <Card>
-            <CardHeader
-              eyebrow={content.recentRx}
-              title="Shared outputs"
-              description="Approved prescriptions stay grouped here, while lab reports appear in their own patient report center."
-            />
-            <div className="space-y-3">
-              {prescriptions.slice(0, 3).map((prescription) => (
-                <Link key={prescription.id} to={`/patient/prescriptions/${prescription.id}`}>
-                  <div className="rounded-[22px] border border-line bg-surface-2 p-4 transition hover:-translate-y-0.5 hover:shadow-soft">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-sm font-semibold text-ink">{formatDate(prescription.issuedAt)}</div>
-                        <div className="mt-1 text-sm text-muted">{prescription.followUpNote}</div>
-                      </div>
-                      <FileText className="h-5 w-5 text-brand-tide" />
+                <div className="mt-5 flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={openPrecheckChat}
+                    className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-brand-tide to-brand-sky px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-brand-sky/25 transition-all hover:shadow-xl hover:shadow-brand-sky/30 hover:-translate-y-0.5 active:translate-y-0"
+                  >
+                    <Sparkles className="h-4 w-4" />
+                    Start Pre-Check
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                  <span className="text-xs text-muted">Takes ~2 minutes</span>
+                </div>
+
+                {pendingPrecheckQuestionnaire?.status === "sent_to_patient" && (
+                  <div className="mt-3 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                    <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                    <span className="text-xs font-medium text-amber-800">Your doctor has sent pre-check questions</span>
+                  </div>
+                )}
+              </div>
+            </Card>
+          </motion.div>
+        )}
+
+        <Card density="compact" className="animate-fade-in">
+          <h3 className="text-xl font-semibold text-ink">Appointment buckets</h3>
+          <p className="mt-1 text-sm text-muted">Tap once to jump into the exact stage of care.</p>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {buckets.map((bucket) => (
+              <Link key={bucket.key} to={`/patient/appointments?bucket=${bucket.key}`} className="rounded-2xl border border-line bg-surface-2 p-4 transition hover:-translate-y-0.5 hover:bg-white">
+                <div className="text-sm font-semibold text-ink">{bucket.label}</div>
+                <div className="mt-2 flex items-center justify-between">
+                  <div className="text-2xl font-bold text-ink">{bucket.count}</div>
+                  <Badge tone={bucket.tone}>{bucket.label}</Badge>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </Card>
+
+        <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
+          <Card density="compact" className="animate-fade-in">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-tide">Upcoming</p>
+                <h3 className="mt-1 text-xl font-semibold text-ink">Calendar highlights</h3>
+              </div>
+              <Badge tone="success">{todayAppointments.length} today</Badge>
+            </div>
+
+            <div className="mt-4 space-y-3">
+              {todayAppointments.slice(0, 2).map((item) => (
+                <Link key={item.id} to={`/patient/appointments/${item.id}?bucket=${item.journeyBucket}`} className="patient-list-card">
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-xl bg-brand-mint p-2 text-brand-tide">
+                      <Calendar className="h-4 w-4 icon-glow" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-ink">{item.doctor?.fullName}</p>
+                      <p className="text-xs text-muted">{formatTime(item.startAt)} · {item.doctor?.specialty || "General"}</p>
                     </div>
                   </div>
+                  <Badge tone={item.journeyBucket === "review" ? "info" : "neutral"}>{item.journeyLabel}</Badge>
                 </Link>
               ))}
-              {prescriptions.length === 0 ? (
-                <div className="rounded-[22px] border border-dashed border-line bg-surface-2 p-5 text-sm text-muted">
-                  {content.noPrescription}
+              {!todayAppointments.length ? (
+                <div className="rounded-2xl border border-dashed border-line bg-surface-2 p-4 text-sm text-muted">
+                  No appointments today. You can still book a slot instantly.
+                </div>
+              ) : null}
+            </div>
+          </Card>
+
+          <Card density="compact" className="animate-fade-in overflow-hidden">
+            <div className="relative">
+              <div className="absolute right-0 top-3 h-16 w-16 rounded-full bg-brand-sky/10 blur-2xl" />
+
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-tide">Health snapshot</p>
+                  <h3 className="mt-1 text-xl font-semibold text-ink">Vitals at a glance</h3>
+                </div>
+                <motion.div
+                  className="rounded-full border border-brand-mint bg-brand-mint/70 px-3 py-1 text-[11px] font-semibold text-brand-tide shadow-sm"
+                  animate={{ scale: [1, 1.04, 1], opacity: [0.82, 1, 0.82] }}
+                  transition={{ duration: 2.6, repeat: Infinity, ease: "easeInOut" }}
+                >
+                  Live feel
+                </motion.div>
+              </div>
+
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <p className="text-xs text-muted">{latestVitalsUpdatedLabel}</p>
+                <span
+                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] ${
+                    hasRecentVitals
+                      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                      : "border-amber-200 bg-amber-50 text-amber-700"
+                  }`}
+                >
+                  {hasRecentVitals ? "Live data" : "Sync pending"}
+                </span>
+              </div>
+
+              <motion.div
+                className="mt-4 grid grid-cols-2 gap-3"
+                initial="hidden"
+                animate="show"
+                variants={{
+                  hidden: {},
+                  show: { transition: { staggerChildren: 0.12 } }
+                }}
+              >
+                {vitalsCards.map((item) => (
+                  <motion.div
+                    key={item.label}
+                    className={`relative overflow-hidden rounded-2xl border border-line bg-gradient-to-br ${item.accent} p-4 shadow-sm`}
+                    variants={{
+                      hidden: { opacity: 0, y: 10 },
+                      show: { opacity: 1, y: 0 }
+                    }}
+                    transition={{ duration: 0.35, ease: "easeOut" }}
+                  >
+                    <div className="relative z-10">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs uppercase tracking-[0.18em] text-muted">{item.label}</p>
+                        <span
+                          className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] ${
+                            item.live
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                              : "border-slate-200 bg-white/80 text-slate-600"
+                          }`}
+                        >
+                          {item.live ? "Live" : "Pending"}
+                        </span>
+                      </div>
+                      <p className="mt-2 text-lg font-semibold text-ink">{item.value}</p>
+                      <p className="mt-1 text-xs text-muted">{item.subtext}</p>
+                    </div>
+
+                    <div className="relative mt-4 h-2 overflow-hidden rounded-full bg-white/70">
+                      <motion.div
+                        className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-brand-tide via-brand-sky to-brand-mint"
+                        initial={{ width: 0 }}
+                        animate={{ width: `${item.bar}%` }}
+                        transition={{ duration: 1.1, ease: "easeOut" }}
+                      />
+                      <motion.span
+                        className="absolute inset-y-0 left-0 w-8 rounded-full bg-white/70 blur-[2px]"
+                        animate={{ x: [0, `${Math.max(0, item.bar - 8)}%`, 0] }}
+                        transition={{ duration: 2.2, repeat: Infinity, ease: "easeInOut" }}
+                      />
+                    </div>
+                  </motion.div>
+                ))}
+              </motion.div>
+
+              <div className="mt-4 flex items-center justify-between rounded-2xl border border-line bg-surface-2 px-4 py-3">
+                <div className="flex items-center gap-3">
+                  <motion.span
+                    className={`h-3 w-3 rounded-full shadow-[0_0_0_0_rgba(16,185,129,0.45)] ${
+                      hasRecentVitals ? "bg-emerald-500" : "bg-amber-500"
+                    }`}
+                    animate={{
+                      scale: [1, 1.2, 1],
+                      boxShadow: hasRecentVitals
+                        ? [
+                            "0 0 0 0 rgba(16,185,129,0.45)",
+                            "0 0 0 10px rgba(16,185,129,0)",
+                            "0 0 0 0 rgba(16,185,129,0)"
+                          ]
+                        : [
+                            "0 0 0 0 rgba(245,158,11,0.45)",
+                            "0 0 0 10px rgba(245,158,11,0)",
+                            "0 0 0 0 rgba(245,158,11,0)"
+                          ]
+                    }}
+                    transition={{ duration: 2.4, repeat: Infinity, ease: "easeInOut" }}
+                  />
+                  <div>
+                    <p className="text-sm font-semibold text-ink">Vitals stream</p>
+                    <p className="text-xs text-muted">
+                      {hasRecentVitals ? "Subtle motion helps spot changes quickly" : "Awaiting next device sync"}
+                    </p>
+                  </div>
+                </div>
+                <HeartPulse className="h-5 w-5 text-brand-tide icon-glow" />
+              </div>
+
+              <Button asChild variant="secondary" className="mt-4 w-full">
+                <Link to="/patient/profile">
+                  <HeartPulse className="h-4 w-4" />
+                  Update
+                </Link>
+              </Button>
+            </div>
+          </Card>
+        </div>
+
+        <div className="grid gap-6 lg:grid-cols-[1fr_1fr]">
+          <Card density="compact" className="animate-fade-in">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xl font-semibold text-ink">Recent Rx</h3>
+              <Button asChild variant="ghost" size="sm">
+                <Link to="/patient/prescriptions">
+                  <List className="h-4 w-4" />
+                  View all
+                </Link>
+              </Button>
+            </div>
+            <div className="mt-4 space-y-3">
+              {latestRx.map((rx) => (
+                <Link key={rx.id} to={`/patient/prescriptions/${rx.id}`} className="patient-list-card">
+                  <div>
+                    <p className="text-sm font-semibold text-ink">{rx.medicines[0]?.name || "Prescription"}</p>
+                    <p className="mt-1 text-xs text-muted">{formatDate(rx.issuedAt)} · {rx.followUpNote}</p>
+                  </div>
+                  <span className="inline-flex items-center gap-1 text-sm font-semibold text-brand-tide">
+                    <FileDown className="h-4 w-4" /> PDF
+                  </span>
+                </Link>
+              ))}
+              {!latestRx.length ? (
+                <div className="rounded-2xl border border-dashed border-line bg-surface-2 p-4 text-sm text-muted">
+                  No Rx yet. Try AI symptom check after your next booking.
+                </div>
+              ) : null}
+            </div>
+          </Card>
+
+          <Card density="compact" className="animate-fade-in">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xl font-semibold text-ink">Recent Tests</h3>
+              <Button asChild variant="ghost" size="sm">
+                <Link to="/patient/tests">
+                  <TestTube className="h-4 w-4" />
+                  View all
+                </Link>
+              </Button>
+            </div>
+            <div className="mt-4 space-y-3">
+              {testOrders.slice(0, 2).map((order) => (
+                <Link key={order.id} to={`/patient/appointments/${order.appointmentId}`} className="patient-list-card">
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-xl bg-cyan-50 p-2 text-cyan-700">
+                      <TestTube className="h-4 w-4" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-ink">
+                        {order.tests?.length || 0} test{(order.tests?.length || 0) === 1 ? "" : "s"} ordered
+                      </p>
+                      <p className="text-xs text-muted">
+                        {formatDate(order.orderedAt)} · {order.doctorName || "Doctor"}
+                      </p>
+                    </div>
+                  </div>
+                  <Badge tone="info">ORDERED</Badge>
+                </Link>
+              ))}
+              {!testOrders.length ? (
+                <div className="rounded-2xl border border-dashed border-line bg-surface-2 p-4 text-sm text-muted">
+                  No tests ordered yet. After your doctor approves a visit with investigations, they appear here.
                 </div>
               ) : null}
             </div>
           </Card>
         </div>
 
-        <Card>
-          <CardHeader
-            eyebrow={content.labReports}
-            title="Recent lab updates"
-            description="Track doctor-requested tests from yet to visit through report ready without leaving the patient dashboard."
-          />
-          <div className="grid gap-4 lg:grid-cols-3">
-            {labOrders.filter((order) => order.status !== "cancelled").slice(0, 3).map((order) => (
-              <Link key={order.id} to={`/patient/lab-reports/${order.id}`}>
-                <div className="rounded-[24px] border border-line bg-surface-2 p-5 transition hover:-translate-y-0.5 hover:shadow-soft">
-                  <div className="flex items-center justify-between gap-3">
-                    <Microscope className="h-5 w-5 text-brand-tide" />
-                    <Badge tone={order.tone}>
-                      {order.patientStatusLabel}
-                    </Badge>
-                  </div>
-                  <div className="mt-4 text-base font-semibold text-ink">{order.tests.map((test) => test.name).join(", ")}</div>
-                  <div className="mt-2 text-sm text-muted">{order.doctor?.fullName}</div>
-                </div>
-              </Link>
-            ))}
-            {!labOrders.filter((order) => order.status !== "cancelled").length ? (
-              <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-5 text-sm text-muted lg:col-span-3">
-                Lab updates will appear here after the doctor sends a test order.
+        {/* ABHA Linking Section - Prominent */}
+        <Card density="compact" className="border-2 border-brand-mint bg-gradient-to-br from-brand-mint/10 to-transparent animate-fade-in">
+          <div className="mb-4 flex items-start justify-between gap-3 sm:items-center sm:gap-4">
+            <div>
+              <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-tide">Health Identity</p>
+              <h3 className="mt-1 text-xl font-semibold text-ink">ABHA Account Linking</h3>
+              <p className="mt-1.5 text-sm text-muted">Connect your Ayushman Bharat Health Account for unified health records across providers</p>
+            </div>
+            <LinkIcon className="hidden h-8 w-8 flex-shrink-0 text-brand-tide sm:block" />
+          </div>
+          
+          <div className="mt-4 rounded-2xl border-2 border-dashed border-brand-mint bg-brand-mint/5 p-4">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-brand-mint">
+                <Check className="h-5 w-5 text-brand-tide" />
               </div>
-            ) : null}
+              <div>
+                <p className="font-semibold text-ink">Link Your ABHA Account</p>
+                <p className="text-xs text-muted">14-digit Health ID or registered phone number</p>
+              </div>
+            </div>
+            <Button asChild className="w-full">
+              <Link to="/patient/profile">
+                <LinkIcon className="h-4 w-4" />
+                Go to Profile & Link ABHA
+              </Link>
+            </Button>
+          </div>
+
+          <div className="mt-4 grid gap-2 sm:grid-cols-3 text-xs">
+            <div className="rounded-lg border border-line p-2">
+              <p className="font-semibold text-ink">Unified Access</p>
+              <p className="text-muted mt-1">All health records in one place</p>
+            </div>
+            <div className="rounded-lg border border-line p-2">
+              <p className="font-semibold text-ink">Easy Sharing</p>
+              <p className="text-muted mt-1">Share with authorized providers</p>
+            </div>
+            <div className="rounded-lg border border-line p-2">
+              <p className="font-semibold text-ink">Better Care</p>
+              <p className="text-muted mt-1">Continuity across clinics</p>
+            </div>
           </div>
         </Card>
 
-        <Card>
-          <CardHeader
-            eyebrow="Patient profile"
-            title={content.profileCompleteness}
-            description="Optional details stay optional, but richer profile data helps the future visit flow feel more complete."
-          />
-          <div className="grid gap-4 md:grid-cols-3">
-            {profileSignals.map((signal) => (
-              <div key={signal} className="rounded-[24px] border border-line bg-surface-2 p-5">
-                <UserRound className="h-5 w-5 text-brand-tide" />
-                <div className="mt-3 text-sm leading-6 text-muted">{signal}</div>
-              </div>
-            ))}
-          </div>
-        </Card>
+        <Link to="/patient/appointments" className="patient-help-bubble" aria-label="Need help?">
+          <MessageCircle className="h-4 w-4" />
+          Need help?
+        </Link>
       </div>
     </AppShell>
   );
