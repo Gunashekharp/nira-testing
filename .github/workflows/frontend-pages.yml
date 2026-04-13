@@ -1,6 +1,12 @@
 name: Deploy Frontend to GitHub Pages
 
 on:
+  push:
+    branches:
+      - dev
+    paths:
+      - .github/workflows/frontend-pages.yml
+      - frontend/NIRA-repo/**
   workflow_dispatch:
 
 permissions:
