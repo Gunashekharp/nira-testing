@@ -5,9 +5,31 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="NIRA MVP frontend demo for patient and doctor workflows."
+      content="NIRA - AI-powered healthcare platform with intelligent pre-charting, FHIR R4, and ABDM integration."
     />
-    <title>NIRA | Frontend MVP</title>
+    <title>NIRA | AI Healthcare Platform</title>
+    <script>
+      (function () {
+        const url = new URL(window.location.href);
+        const redirectPath = url.searchParams.get("__nira_redirect__");
+
+        if (!redirectPath) {
+          return;
+        }
+
+        url.searchParams.delete("__nira_redirect__");
+
+        const pathSegments = window.location.pathname.split("/").filter(Boolean);
+        const basePath =
+          window.location.hostname.endsWith("github.io") && pathSegments.length
+            ? `/${pathSegments[0]}`
+            : "";
+        const remainingSearch = url.searchParams.toString();
+        const restoredUrl = `${basePath}${redirectPath}${remainingSearch ? `?${remainingSearch}` : ""}${url.hash}`;
+
+        window.history.replaceState(null, "", restoredUrl);
+      })();
+    </script>
   </head>
   <body class="bg-surface text-ink antialiased">
     <div id="root"></div>

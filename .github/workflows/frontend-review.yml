@@ -1,0 +1,68 @@
+name: Frontend Review Build
+
+on:
+  pull_request:
+    paths:
+      - .env.example
+      - Dockerfile
+      - README.md
+      - db/**
+      - docs/**
+      - index.html
+      - nginx.conf
+      - package-lock.json
+      - package.json
+      - postcss.config.js
+      - public/**
+      - scripts/**
+      - server/**
+      - src/**
+      - supabase/**
+      - tailwind.config.js
+      - vercel.json
+      - vite.config.js
+      - .github/workflows/frontend-review.yml
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - .env.example
+      - Dockerfile
+      - README.md
+      - db/**
+      - docs/**
+      - index.html
+      - nginx.conf
+      - package-lock.json
+      - package.json
+      - postcss.config.js
+      - public/**
+      - scripts/**
+      - server/**
+      - src/**
+      - supabase/**
+      - tailwind.config.js
+      - vercel.json
+      - vite.config.js
+      - .github/workflows/frontend-review.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build

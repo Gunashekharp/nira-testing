@@ -1,25 +1,28 @@
 import { addDays, getTodayDayKey } from "../../lib/schedule";
-import {
-  DOCTOR_LAB_FILTERS,
-  PATIENT_LAB_BUCKETS as PATIENT_LAB_BUCKET_KEYS,
-  getDoctorLabStatusLabel,
-  getLabOrderTone,
-  getLabProgress,
-  getPatientLabBucket,
-  getPatientLabStatusLabel,
-  isEditableLabOrder
-} from "../../services/labHelpers";
 import { getNextAvailableSlot, getScheduleLabel, listCollection } from "../../services/stateHelpers";
 
-export const PATIENT_APPOINTMENT_BUCKETS = ["all", "upcoming", "action", "review", "completed", "cancelled"];
-export const LAB_ORDER_BUCKETS = DOCTOR_LAB_FILTERS;
-export const PATIENT_LAB_BUCKETS = PATIENT_LAB_BUCKET_KEYS;
+export const PATIENT_APPOINTMENT_BUCKETS = ["all", "upcoming", "action", "review", "missed", "completed", "cancelled"];
+
+function buildPatientBookingPath(doctorId, rescheduleAppointmentId = "") {
+  const searchParams = new URLSearchParams();
+
+  if (doctorId) {
+    searchParams.set("doctorId", doctorId);
+  }
+
+  if (rescheduleAppointmentId) {
+    searchParams.set("rescheduleAppointmentId", rescheduleAppointmentId);
+  }
+
+  const query = searchParams.toString();
+  return query ? `/patient/booking?${query}` : "/patient/booking";
+}
 
 export function getRoleHomePath(role) {
   if (role === "patient") return "/patient";
   if (role === "doctor") return "/doctor";
+  if (role === "nurse") return "/nurse";
   if (role === "admin") return "/admin";
-  if (role === "lab") return "/lab";
   return "/auth";
 }
 
@@ -37,10 +40,15 @@ export function getCurrentProfile(state) {
     return null;
   }
 
-  if (user.role === "patient") return state.patients.byId[user.profileId] || null;
-  if (user.role === "doctor") return state.doctors.byId[user.profileId] || null;
-  if (user.role === "lab") return state.labs.byId[user.profileId] || null;
-  return state.admins.byId[user.profileId] || null;
+  const collectionKey =
+    user.role === "patient"
+      ? "patients"
+      : user.role === "doctor"
+        ? "doctors"
+        : user.role === "nurse"
+          ? "nurses"
+          : "admins";
+  return state[collectionKey].byId[user.profileId] || null;
 }
 
 export function getDoctorSchedules(state, doctorId, days = 14, startDayKey = state.meta.today || getTodayDayKey()) {
@@ -72,63 +80,6 @@ export function getBookableDoctors(state) {
     });
 }
 
-function getPrescriptionByAppointmentId(state, appointmentId, encounter) {
-  if (encounter?.prescriptionId) {
-    return state.prescriptions.byId[encounter.prescriptionId] || null;
-  }
-
-  return listCollection(state.prescriptions).find((item) => item.appointmentId === appointmentId) || null;
-}
-
-function getLabOrdersForAppointment(state, appointmentId) {
-  return listCollection(state.labOrders)
-    .filter((order) => order.appointmentId === appointmentId)
-    .sort((left, right) => new Date(right.orderedAt || 0) - new Date(left.orderedAt || 0));
-}
-
-function getLabReportForOrder(state, order) {
-  if (!order?.reportId) {
-    return null;
-  }
-
-  return state.labReports.byId[order.reportId] || null;
-}
-
-function buildLabOrderBundle(state, order) {
-  if (!order) {
-    return null;
-  }
-
-  const report = getLabReportForOrder(state, order);
-  const appointment = state.appointments.byId[order.appointmentId] || null;
-  const patient = state.patients.byId[order.patientId] || null;
-  const doctor = state.doctors.byId[order.doctorId] || null;
-  const assignedLabUser =
-    listCollection(state.users).find((user) => user.id === order.assignedLabUserId && user.role === "lab") || null;
-  const assignedLabProfile = assignedLabUser ? state.labs.byId[assignedLabUser.profileId] || null : null;
-  const tests = order.selectedTestIds.map((testId) => state.labCatalog.byId[testId]).filter(Boolean);
-
-  return {
-    ...order,
-    appointment,
-    patient,
-    doctor,
-    tests,
-    report,
-    assignedLabProfile,
-    doctorStatusLabel: getDoctorLabStatusLabel(order.status),
-    patientStatusLabel: getPatientLabStatusLabel(order.status),
-    patientBucket: getPatientLabBucket(order.status),
-    tone: getLabOrderTone(order.status),
-    progress: getLabProgress(order.status),
-    isEditable: isEditableLabOrder(order)
-  };
-}
-
-export function getLabOrderBundle(state, labOrderId) {
-  return buildLabOrderBundle(state, state.labOrders.byId[labOrderId] || null);
-}
-
 export function getAppointmentBundle(state, appointmentId) {
   const appointment = state.appointments.byId[appointmentId];
   if (!appointment) {
@@ -139,9 +90,15 @@ export function getAppointmentBundle(state, appointmentId) {
   const patient = state.patients.byId[appointment.patientId];
   const doctor = state.doctors.byId[appointment.doctorId];
   const interview = state.interviews.byId[`interview-${appointmentId}`];
-  const prescription = getPrescriptionByAppointmentId(state, appointmentId, encounter);
-  const labOrders = getLabOrdersForAppointment(state, appointmentId).map((order) => buildLabOrderBundle(state, order));
-  const latestCompletedLabOrder = labOrders.find((order) => order.report) || null;
+  const prescription = encounter?.prescriptionId
+    ? state.prescriptions.byId[encounter.prescriptionId]
+    : listCollection(state.prescriptions).find((item) => item.appointmentId === appointmentId) || null;
+  const labReport = listCollection(state.labReports)
+    .filter((item) => item.appointmentId === appointmentId)
+    .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0] || null;
+  const precheckQuestionnaire = listCollection(state.precheckQuestionnaires).find((item) => item.appointmentId === appointmentId) || null;
+  const emrSync = state.emrSync?.byId?.[`emr-${appointmentId}`] || null;
+  const dbSync = state.dbSync?.byId?.[`db-${appointmentId}`] || null;
 
   return {
     appointment,
@@ -152,21 +109,62 @@ export function getAppointmentBundle(state, appointmentId) {
     draft: encounter?.apciDraft || null,
     review: encounter?.doctorReview || null,
     prescription,
-    labOrders,
-    editableLabOrder: labOrders.find((order) => order.isEditable) || null,
-    latestLabOrder: labOrders[0] || null,
-    latestCompletedLabOrder,
-    latestLabReport: latestCompletedLabOrder?.report || null
+    labReport,
+    precheckQuestionnaire,
+    emrSync,
+    dbSync
   };
 }
 
-function getPatientJourneyBucket(appointment, encounter, prescription) {
+function getAppointmentEndAtMs(appointment, defaultDurationMinutes = 15) {
+  const endAtMs = new Date(appointment?.endAt || "").getTime();
+  if (Number.isFinite(endAtMs)) {
+    return endAtMs;
+  }
+
+  const startAtMs = new Date(appointment?.startAt || "").getTime();
+  if (!Number.isFinite(startAtMs)) {
+    return Number.NaN;
+  }
+
+  const durationMinutes = Number(appointment?.slotDurationMinutes || defaultDurationMinutes);
+  const safeDurationMinutes = Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : 15;
+
+  return startAtMs + safeDurationMinutes * 60 * 1000;
+}
+
+function hasAppointmentEnded(appointment, reference = new Date(), defaultDurationMinutes = 15) {
+  const endAtMs = getAppointmentEndAtMs(appointment, defaultDurationMinutes);
+  return Number.isFinite(endAtMs) && endAtMs < reference.getTime();
+}
+
+function isMissedPatientAppointment(appointment, encounter, doctor, reference = new Date()) {
+  if (!appointment || ["completed", "cancelled"].includes(appointment.bookingStatus)) {
+    return false;
+  }
+
+  if (!["scheduled", "rescheduled"].includes(appointment.bookingStatus)) {
+    return false;
+  }
+
+  if (encounter?.status === "approved") {
+    return false;
+  }
+
+  return hasAppointmentEnded(appointment, reference, doctor?.slotDurationMinutes);
+}
+
+function getPatientJourneyBucket(appointment, encounter, prescription, doctor) {
   if (appointment.bookingStatus === "cancelled") {
     return "cancelled";
   }
 
   if (appointment.bookingStatus === "completed" || encounter?.status === "approved" || prescription) {
     return "completed";
+  }
+
+  if (isMissedPatientAppointment(appointment, encounter, doctor)) {
+    return "missed";
   }
 
   if (encounter?.status === "awaiting_interview") {
@@ -189,8 +187,12 @@ function getPatientJourneyLabel(bucket, encounterStatus) {
     return "Prescription approved";
   }
 
+  if (bucket === "missed") {
+    return "Missed appointment";
+  }
+
   if (bucket === "action") {
-    return "Interview pending";
+    return "Pre-check pending";
   }
 
   if (bucket === "review") {
@@ -200,12 +202,20 @@ function getPatientJourneyLabel(bucket, encounterStatus) {
   return "Upcoming visit";
 }
 
-function getInterviewState(appointment, interview, encounter) {
-  if (!interview || interview.completionStatus === "pending") {
+function getInterviewStatus(appointment, encounter, precheckQuestionnaire) {
+  if (precheckQuestionnaire?.status === "sent_to_patient") {
     return {
       key: "pending",
-      label: "Not started / pending",
-      description: "Complete the AI interview before the doctor reviews your visit."
+      label: "Pre-check pending",
+      description: "Complete the pre-check before the doctor reviews your visit."
+    };
+  }
+
+  if (precheckQuestionnaire?.status === "completed") {
+    return {
+      key: "submitted",
+      label: "Submitted to doctor",
+      description: "Your pre-check is complete and waiting in the doctor workspace."
     };
   }
 
@@ -213,23 +223,39 @@ function getInterviewState(appointment, interview, encounter) {
     return {
       key: "reviewed",
       label: "Reviewed / completed",
-      description: "The doctor has already used your AI intake and finished the visit."
+      description: "The doctor has already used your pre-check summary and finished the visit."
     };
   }
 
   return {
-    key: "submitted",
-    label: "Submitted to doctor",
-    description: "Your AI interview is complete and waiting in the doctor workspace."
+    key: "none",
+    label: "No pre-check",
+    description: "No pre-check is available for this appointment yet."
   };
 }
 
 function buildPatientNextAction(appointmentItem) {
-  if (appointmentItem.canStartInterview) {
+  if (appointmentItem.precheckQuestionnaire?.status === "sent_to_patient") {
     return {
-      label: "Start AI interview",
-      description: "Finish the pre-visit intake so the doctor receives your draft before the consultation.",
-      to: `/patient/interview/${appointmentItem.id}`
+      label: "Complete pre-check in chat",
+      description: "Open your appointment details, then complete the doctor pre-check inside the chatbot.",
+      to: `/patient/appointments/${appointmentItem.id}?bucket=${appointmentItem.journeyBucket}`
+    };
+  }
+
+  if (appointmentItem.precheckQuestionnaire?.status === "completed") {
+    return {
+      label: "Pre-check completed",
+      description: "Your answers are now synced and visible in the doctor workspace.",
+      to: `/patient/appointments/${appointmentItem.id}?bucket=${appointmentItem.journeyBucket}`
+    };
+  }
+
+  if (appointmentItem.canViewInterview) {
+    return {
+      label: "View pre-check summary",
+      description: "Check the pre-check summary and current doctor review status.",
+      to: `/patient/appointments/${appointmentItem.id}?bucket=${appointmentItem.journeyBucket}`
     };
   }
 
@@ -241,27 +267,19 @@ function buildPatientNextAction(appointmentItem) {
     };
   }
 
-  if (appointmentItem.canViewLabReport) {
-    return {
-      label: "View lab report",
-      description: "A completed lab report is ready to open and download.",
-      to: `/patient/lab-reports/${appointmentItem.latestCompletedLabOrder.id}`
-    };
-  }
-
-  if (appointmentItem.canViewInterview) {
-    return {
-      label: "View interview summary",
-      description: "Check the AI interview summary and current doctor review status.",
-      to: `/patient/appointments/${appointmentItem.id}?bucket=${appointmentItem.journeyBucket}#interview-summary`
-    };
-  }
-
   if (appointmentItem.bookingStatus === "cancelled") {
     return {
       label: "Book another appointment",
-      description: "This visit is cancelled. You can rebook quickly with the same doctor.",
-      to: `/patient/booking?doctorId=${appointmentItem.doctorId}`
+      description: "This visit is cancelled. You can book a new slot whenever you are ready.",
+      to: buildPatientBookingPath(appointmentItem.doctorId)
+    };
+  }
+
+  if (appointmentItem.journeyBucket === "missed") {
+    return {
+      label: "Reschedule appointment",
+      description: "This slot has already passed. Choose a fresh time with the same doctor to continue care without losing track.",
+      to: buildPatientBookingPath(appointmentItem.doctorId, appointmentItem.id)
     };
   }
 
@@ -276,13 +294,16 @@ function buildPatientAppointmentItem(state, appointment) {
   const encounter = state.encounters.byId[`encounter-${appointment.id}`] || null;
   const interview = state.interviews.byId[`interview-${appointment.id}`] || null;
   const doctor = state.doctors.byId[appointment.doctorId] || null;
-  const prescription = getPrescriptionByAppointmentId(state, appointment.id, encounter);
-  const labOrders = getLabOrdersForAppointment(state, appointment.id).map((order) => buildLabOrderBundle(state, order));
-  const latestLabOrder = labOrders[0] || null;
-  const latestCompletedLabOrder = labOrders.find((order) => order.report) || null;
-  const latestLabReport = latestCompletedLabOrder?.report || null;
-  const journeyBucket = getPatientJourneyBucket(appointment, encounter, prescription);
-  const interviewState = getInterviewState(appointment, interview, encounter);
+  const precheckQuestionnaire = listCollection(state.precheckQuestionnaires).find((item) => item.appointmentId === appointment.id) || null;
+  const prescription =
+    encounter?.prescriptionId
+      ? state.prescriptions.byId[encounter.prescriptionId]
+      : listCollection(state.prescriptions).find((item) => item.appointmentId === appointment.id) || null;
+  const testOrderCollection = state.testOrders || { allIds: [], byId: {} };
+  const testOrder = testOrderCollection.byId[`tests-${appointment.id}`] || null;
+  const hasTests = testOrder && ((testOrder.tests?.length || 0) > 0 || String(testOrder.patientNote || "").trim().length > 0);
+  const journeyBucket = getPatientJourneyBucket(appointment, encounter, prescription, doctor);
+  const interviewStatus = getInterviewStatus(appointment, encounter, precheckQuestionnaire);
 
   const appointmentItem = {
     ...appointment,
@@ -291,21 +312,20 @@ function buildPatientAppointmentItem(state, appointment) {
     encounterStatus: encounter?.status || "awaiting_interview",
     interview,
     interviewStatus: interview?.completionStatus || "pending",
-    interviewState,
+    interviewState: interviewStatus,
+    precheckQuestionnaire,
     prescription,
     prescriptionId: prescription?.id || null,
-    labOrders,
-    latestLabOrder,
-    latestCompletedLabOrder,
-    latestLabStatus: latestLabOrder?.patientStatusLabel || "No lab request",
-    latestLabReport,
+    testOrder: hasTests ? testOrder : null,
     journeyBucket,
     journeyLabel: getPatientJourneyLabel(journeyBucket, encounter?.status),
-    canCancel: !["completed", "cancelled"].includes(appointment.bookingStatus),
-    canStartInterview: encounter?.status === "awaiting_interview",
-    canViewInterview: !!interview?.transcript?.length && ["ai_ready", "in_consult", "approved"].includes(encounter?.status),
+    canCancel:
+      !["completed", "cancelled"].includes(appointment.bookingStatus) &&
+      !hasAppointmentEnded(appointment, new Date(), doctor?.slotDurationMinutes),
+    canStartInterview: precheckQuestionnaire?.status === "sent_to_patient",
+    canViewInterview: precheckQuestionnaire?.status === "completed" || interview?.completionStatus === "complete",
     canViewPrescription: !!prescription,
-    canViewLabReport: !!latestCompletedLabOrder?.report
+    canViewTests: !!hasTests
   };
 
   return {
@@ -323,6 +343,10 @@ export function getPatientAppointmentById(state, appointmentId) {
   return buildPatientAppointmentItem(state, appointment);
 }
 
+export function getPatientReschedulePath(appointment) {
+  return buildPatientBookingPath(appointment?.doctorId, appointment?.id);
+}
+
 export function getPatientWorkspace(state) {
   const patient = getCurrentProfile(state);
   if (!patient) {
@@ -334,6 +358,7 @@ export function getPatientWorkspace(state) {
         upcoming: [],
         action: [],
         review: [],
+        missed: [],
         completed: [],
         cancelled: []
       },
@@ -342,28 +367,17 @@ export function getPatientWorkspace(state) {
         upcoming: 0,
         action: 0,
         review: 0,
+        missed: 0,
         completed: 0,
         cancelled: 0
       },
       nextAppointment: null,
       pendingInterview: null,
       prescriptions: [],
-      labOrders: [],
-      labReports: [],
-      labCounts: {
-        total: 0,
-        yetToVisit: 0,
-        sampleGiven: 0,
-        completed: 0,
-        cancelled: 0
-      },
-      labBuckets: {
-        total: [],
-        yet_to_visit: [],
-        sample_given: [],
-        completed: [],
-        cancelled: []
-      },
+      testOrders: [],
+      notifications: [],
+      unreadNotificationCount: 0,
+      pendingPrecheckQuestionnaire: null,
       nextRecommendedAction: {
         label: "Book appointment",
         description: "Start by choosing a doctor and a live available slot.",
@@ -382,6 +396,7 @@ export function getPatientWorkspace(state) {
     upcoming: appointments.filter((appointment) => appointment.journeyBucket === "upcoming"),
     action: appointments.filter((appointment) => appointment.journeyBucket === "action"),
     review: appointments.filter((appointment) => appointment.journeyBucket === "review"),
+    missed: appointments.filter((appointment) => appointment.journeyBucket === "missed"),
     completed: appointments.filter((appointment) => appointment.journeyBucket === "completed"),
     cancelled: appointments.filter((appointment) => appointment.journeyBucket === "cancelled")
   };
@@ -391,6 +406,7 @@ export function getPatientWorkspace(state) {
     upcoming: appointmentsByBucket.upcoming.length,
     action: appointmentsByBucket.action.length,
     review: appointmentsByBucket.review.length,
+    missed: appointmentsByBucket.missed.length,
     completed: appointmentsByBucket.completed.length,
     cancelled: appointmentsByBucket.cancelled.length
   };
@@ -399,51 +415,41 @@ export function getPatientWorkspace(state) {
     appointmentsByBucket.upcoming[0] ||
     appointmentsByBucket.action[0] ||
     appointmentsByBucket.review[0] ||
-    appointments.find((appointment) => appointment.bookingStatus !== "cancelled") ||
+    appointmentsByBucket.completed[0] ||
     null;
   const pendingInterview = appointmentsByBucket.action[0] || null;
   const prescriptions = listCollection(state.prescriptions)
     .filter((prescription) => prescription.patientId === patient.id)
     .sort((left, right) => new Date(right.issuedAt) - new Date(left.issuedAt));
-  const labOrders = listCollection(state.labOrders)
-    .filter((order) => order.patientId === patient.id)
-    .sort((left, right) => new Date(right.orderedAt || 0) - new Date(left.orderedAt || 0))
-    .map((order) => buildLabOrderBundle(state, order));
-  const activeLabOrders = labOrders.filter((order) => order.status !== "cancelled");
-  const labBuckets = {
-    total: activeLabOrders,
-    yet_to_visit: activeLabOrders.filter((order) => order.patientBucket === "yet_to_visit"),
-    sample_given: activeLabOrders.filter((order) => order.patientBucket === "sample_given"),
-    completed: activeLabOrders.filter((order) => order.patientBucket === "completed"),
-    cancelled: labOrders.filter((order) => order.status === "cancelled")
-  };
   const labReports = listCollection(state.labReports)
     .filter((report) => report.patientId === patient.id)
-    .sort((left, right) => new Date(right.completedAt || 0) - new Date(left.completedAt || 0));
-  const labCounts = {
-    total: labBuckets.total.length,
-    yetToVisit: labBuckets.yet_to_visit.length,
-    sampleGiven: labBuckets.sample_given.length,
-    completed: labBuckets.completed.length,
-    cancelled: labBuckets.cancelled.length
-  };
-  const completedLabOrder = labBuckets.completed[0] || null;
+    .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
+  const testOrders = listCollection(state.testOrders || { allIds: [], byId: {} })
+    .filter((order) => {
+      if (order.patientId !== patient.id) return false;
+      const hasTests = (order.tests?.length ?? 0) > 0;
+      const hasNote = String(order.patientNote || "").trim().length > 0;
+      return hasTests || hasNote;
+    })
+    .sort((left, right) => new Date(right.orderedAt || 0) - new Date(left.orderedAt || 0));
+  const notifications = listCollection(state.notifications)
+    .filter((notification) => notification.userId === patient.userId)
+    .sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
+  const unreadNotificationCount = notifications.filter((notification) => !notification.is_read).length;
+  const pendingPrecheckQuestionnaire = listCollection(state.precheckQuestionnaires)
+    .filter((questionnaire) => questionnaire.patientId === patient.id)
+    .sort((left, right) => new Date(right.updatedAt || right.createdAt) - new Date(left.updatedAt || left.createdAt))
+    .find((questionnaire) => questionnaire.status === "sent_to_patient") || null;
   const nextRecommendedAction =
     appointmentsByBucket.action[0]?.nextAction ||
     appointmentsByBucket.review[0]?.nextAction ||
     appointmentsByBucket.upcoming[0]?.nextAction ||
-    appointmentsByBucket.completed[0]?.nextAction ||
-    (completedLabOrder
-      ? {
-          label: "Open lab reports",
-          description: "Completed lab reports are ready in the patient portal.",
-          to: "/patient/lab-reports?bucket=completed"
-        }
-      : {
-          label: "Book appointment",
-          description: "Choose a doctor and a live slot to start the next visit.",
-          to: "/patient/booking"
-        });
+    appointmentsByBucket.missed[0]?.nextAction ||
+    appointmentsByBucket.completed[0]?.nextAction || {
+      label: "Book appointment",
+      description: "Choose a doctor and a live slot to start the next visit.",
+      to: "/patient/booking"
+    };
 
   return {
     patient,
@@ -453,10 +459,11 @@ export function getPatientWorkspace(state) {
     nextAppointment,
     pendingInterview,
     prescriptions,
-    labOrders,
     labReports,
-    labCounts,
-    labBuckets,
+    testOrders,
+    notifications,
+    unreadNotificationCount,
+    pendingPrecheckQuestionnaire,
     nextRecommendedAction
   };
 }
@@ -472,15 +479,6 @@ export function getDoctorWorkspace(state) {
         aiReady: 0,
         inConsult: 0,
         approved: 0
-      },
-      labOrders: [],
-      labCounts: {
-        total: 0,
-        ordered: 0,
-        sampleReceived: 0,
-        processing: 0,
-        completed: 0,
-        cancelled: 0
       }
     };
   }
@@ -490,133 +488,62 @@ export function getDoctorWorkspace(state) {
     .sort((left, right) => new Date(left.startAt) - new Date(right.startAt))
     .map((appointment) => {
       const encounter = state.encounters.byId[`encounter-${appointment.id}`];
-      const labOrders = getLabOrdersForAppointment(state, appointment.id).map((order) => buildLabOrderBundle(state, order));
-
+      const labReport = listCollection(state.labReports)
+        .filter((report) => report.appointmentId === appointment.id)
+        .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0] || null;
+      const emrSync = state.emrSync?.byId?.[`emr-${appointment.id}`] || null;
+      const dbSync = state.dbSync?.byId?.[`db-${appointment.id}`] || null;
       return {
         ...appointment,
         patient: state.patients.byId[appointment.patientId],
         interview: state.interviews.byId[`interview-${appointment.id}`],
         encounter,
+        labReport,
+        emrSync,
+        dbSync,
         draft: encounter?.apciDraft || null,
         review: encounter?.doctorReview || null,
-        queueStatus: encounter?.status || "awaiting_interview",
-        labOrders,
-        latestLabOrder: labOrders[0] || null,
-        latestLabReport: labOrders.find((order) => order.report)?.report || null
+        queueStatus: encounter?.status || "awaiting_interview"
       };
     });
 
-  const labOrders = listCollection(state.labOrders)
-    .filter((order) => order.doctorId === doctor.id)
-    .sort((left, right) => new Date(right.orderedAt || 0) - new Date(left.orderedAt || 0))
-    .map((order) => buildLabOrderBundle(state, order));
+  const labReports = listCollection(state.labReports)
+    .filter((report) => report.doctorId === doctor.id)
+    .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt));
 
   return {
     doctor,
     appointments,
+    labReports,
     queueCounts: {
       total: appointments.length,
       aiReady: appointments.filter((item) => item.queueStatus === "ai_ready").length,
       inConsult: appointments.filter((item) => item.queueStatus === "in_consult").length,
       approved: appointments.filter((item) => item.queueStatus === "approved").length
-    },
-    labOrders,
-    labCounts: {
-      total: labOrders.filter((order) => order.status !== "cancelled").length,
-      ordered: labOrders.filter((order) => order.status === "ordered").length,
-      sampleReceived: labOrders.filter((order) => order.status === "sample_received").length,
-      processing: labOrders.filter((order) => order.status === "processing").length,
-      completed: labOrders.filter((order) => order.status === "completed").length,
-      cancelled: labOrders.filter((order) => order.status === "cancelled").length
     }
   };
 }
 
 export function getAdminWorkspace(state) {
   const doctors = listCollection(state.doctors);
+  const admins = listCollection(state.admins);
   const appointments = listCollection(state.appointments).sort(
     (left, right) => new Date(left.startAt) - new Date(right.startAt)
   );
-  const patients = listCollection(state.patients)
-    .map((patient) => {
-      const user = state.users.byId[patient.userId];
-      const patientAppointments = appointments.filter((appointment) => appointment.patientId === patient.id);
-      const patientLabOrders = listCollection(state.labOrders).filter((order) => order.patientId === patient.id);
-
-      return {
-        ...patient,
-        userStatus: user?.status || "active",
-        appointmentCount: patientAppointments.length,
-        activeAppointmentCount: patientAppointments.filter((appointment) => appointment.bookingStatus !== "cancelled").length,
-        labOrderCount: patientLabOrders.filter((order) => order.status !== "cancelled").length,
-        completedLabReportCount: patientLabOrders.filter((order) => order.status === "completed").length
-      };
-    })
-    .sort((left, right) => left.fullName.localeCompare(right.fullName));
 
   return {
     admin: getCurrentProfile(state),
+    admins,
     doctors,
-    patients,
+    patients: listCollection(state.patients),
     appointments,
     pendingDoctors: doctors.filter((doctor) => doctor.status === "pending_approval"),
     counts: {
+      admins: admins.length,
       doctors: doctors.length,
       pendingDoctors: doctors.filter((doctor) => doctor.status === "pending_approval").length,
-      patients: patients.length,
-      appointments: appointments.length,
-      labOrders: listCollection(state.labOrders).filter((order) => order.status !== "cancelled").length
-    }
-  };
-}
-
-export function getLabWorkspace(state) {
-  const lab = getCurrentProfile(state);
-  if (!lab) {
-    return {
-      lab: null,
-      orders: [],
-      ordersByBucket: {
-        all: [],
-        ordered: [],
-        sample_received: [],
-        processing: [],
-        completed: [],
-        cancelled: []
-      },
-      counts: {
-        total: 0,
-        ordered: 0,
-        sampleReceived: 0,
-        processing: 0,
-        completed: 0,
-        cancelled: 0
-      }
-    };
-  }
-
-  const orders = listCollection(state.labOrders)
-    .sort((left, right) => new Date(right.orderedAt || 0) - new Date(left.orderedAt || 0))
-    .map((order) => buildLabOrderBundle(state, order));
-
-  return {
-    lab,
-    orders,
-    ordersByBucket: {
-      all: orders,
-      ordered: orders.filter((order) => order.status === "ordered"),
-      sample_received: orders.filter((order) => order.status === "sample_received"),
-      processing: orders.filter((order) => order.status === "processing"),
-      completed: orders.filter((order) => order.status === "completed"),
-      cancelled: orders.filter((order) => order.status === "cancelled")
-    },
-    counts: {
-      total: orders.filter((order) => order.status !== "cancelled").length,
-      ordered: orders.filter((order) => order.status === "ordered").length,
-      sampleReceived: orders.filter((order) => order.status === "sample_received").length,
-      processing: orders.filter((order) => order.status === "processing").length,
-      completed: orders.filter((order) => order.status === "completed").length,
-      cancelled: orders.filter((order) => order.status === "cancelled").length
+      patients: state.patients.allIds.length,
+      appointments: appointments.length
     }
   };
 }

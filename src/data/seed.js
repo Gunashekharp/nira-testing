@@ -1,7 +1,6 @@
 import "./contracts";
 import { toIsoDateTime, addDays, getTodayDayKey } from "../lib/schedule";
 import { emptyEncounterDraft } from "../services/clinicalHelpers";
-import { createLabCatalogSeed } from "../services/labHelpers";
 import {
   createDayRule,
   createWeeklyRules,
@@ -33,6 +32,7 @@ function createPatient(id, userId, values) {
     id,
     userId,
     fullName: values.fullName,
+    profilePhoto: values.profilePhoto || "",
     preferredLanguage: values.preferredLanguage || "en",
     age: values.age ?? null,
     gender: values.gender || "",
@@ -51,6 +51,7 @@ function createDoctor(id, userId, values) {
     id,
     userId,
     fullName: values.fullName,
+    profilePhoto: values.profilePhoto || "",
     specialty: values.specialty,
     clinic: values.clinic || "NIRA Pilot Clinic",
     licenseNumber: values.licenseNumber,
@@ -64,25 +65,35 @@ function createDoctor(id, userId, values) {
   };
 }
 
+function createNurse(id, userId, values) {
+  return {
+    id,
+    userId,
+    fullName: values.fullName,
+    profilePhoto: values.profilePhoto || "",
+    clinic: values.clinic || "NIRA Pilot Clinic",
+    department: values.department || "General OPD",
+    shift: values.shift || "day",
+    assignedWard: values.assignedWard || "OPD-A",
+    nursingLicenseNumber: values.nursingLicenseNumber || "",
+    yearsExperience: values.yearsExperience ?? null,
+    phone: values.phone || "",
+    email: values.email || "",
+    emergencyContactName: values.emergencyContactName || "",
+    emergencyContactPhone: values.emergencyContactPhone || "",
+    notes: values.notes || ""
+  };
+}
+
 function createAdmin(id, userId, values) {
   return {
     id,
     userId,
     fullName: values.fullName,
+    profilePhoto: values.profilePhoto || "",
     clinicName: values.clinicName || "NIRA Pilot Clinic",
     phone: values.phone || "",
     email: values.email || ""
-  };
-}
-
-function createLabTechnician(id, userId, values) {
-  return {
-    id,
-    userId,
-    fullName: values.fullName,
-    phone: values.phone || "",
-    email: values.email || "",
-    status: values.status || "active"
   };
 }
 
@@ -126,8 +137,6 @@ function createEncounter(id, appointmentId, doctorId, patientId, interviewId, st
     finalClinicalNote: "",
     alerts: draft.alerts,
     confidenceMap: draft.confidenceMap,
-    labSuggestions: draft.labSuggestions || [],
-    labOrderIds: [],
     prescriptionId,
     approvedAt: null
   };
@@ -136,7 +145,7 @@ function createEncounter(id, appointmentId, doctorId, patientId, interviewId, st
 function baseState() {
   return {
     meta: {
-      version: "v5",
+      version: "v2",
       lastSyncedAt: nowIso(),
       today: getTodayDayKey()
     },
@@ -150,15 +159,16 @@ function baseState() {
     users: indexCollection([]),
     patients: indexCollection([]),
     doctors: indexCollection([]),
+    nurses: indexCollection([]),
     admins: indexCollection([]),
-    labs: indexCollection([]),
     appointments: indexCollection([]),
     interviews: indexCollection([]),
     encounters: indexCollection([]),
     prescriptions: indexCollection([]),
-    labCatalog: indexCollection([]),
-    labOrders: indexCollection([]),
     labReports: indexCollection([]),
+    testOrders: indexCollection([]),
+    precheckQuestionnaires: indexCollection([]),
+    notifications: indexCollection([]),
     scheduleTemplates: indexCollection([]),
     scheduleOverrides: indexCollection([]),
     daySchedules: indexCollection([]),
@@ -253,19 +263,6 @@ export function createSeedState() {
     email: adminUser.email
   });
 
-  const labUser = createUser("user-lab-primary", "lab", "lab-primary", {
-    phone: "+91 91111 20000",
-    email: "lab@nira.local",
-    password: "Lab@123",
-    status: "active"
-  });
-  const labProfile = createLabTechnician("lab-primary", labUser.id, {
-    fullName: "Priya Nair",
-    phone: labUser.phone,
-    email: labUser.email,
-    status: "active"
-  });
-
   const doctorUsers = [
     createUser("user-doc-mehra", "doctor", "doctor-mehra", {
       phone: "+91 91000 10001",
@@ -289,7 +286,7 @@ export function createSeedState() {
       phone: "+91 91000 10004",
       email: "farah.ali@nira.local",
       password: "Doctor@123",
-      status: "pending_approval"
+      status: "active"
     })
   ];
 
@@ -335,12 +332,12 @@ export function createSeedState() {
       specialty: "General Medicine",
       clinic: "NIRA Pilot Clinic",
       licenseNumber: "KMC-GM-28419",
-      status: "pending_approval",
-      acceptingAppointments: false,
+      status: "active",
+      acceptingAppointments: true,
       slotDurationMinutes: 15,
       phone: doctorUsers[3].phone,
       email: doctorUsers[3].email,
-      bio: "Recently self-registered doctor waiting for approval."
+      bio: "General medicine consultant for first-line OPD care and follow-up visits."
     })
   ];
 
@@ -374,13 +371,44 @@ export function createSeedState() {
       phone: "+91 98112 14567",
       email: "anika@nira.local",
       password: "Patient@123"
+    }),
+    createUser("user-patient-priya", "patient", "patient-priya", {
+      phone: "+91 98711 22559",
+      email: "priya@nira.local",
+      password: "Patient@123"
+    })
+  ];
+
+  const nurseUsers = [
+    createUser("user-nurse-primary", "nurse", "nurse-primary", {
+      phone: "+91 95555 22110",
+      email: "nurse@nira.local",
+      password: "Nurse@123",
+      status: "active"
+    })
+  ];
+
+  const nurses = [
+    createNurse("nurse-primary", nurseUsers[0].id, {
+      fullName: "Sister Priya Nair",
+      clinic: "NIRA Pilot Clinic",
+      department: "General OPD",
+      shift: "day",
+      assignedWard: "OPD-A",
+      nursingLicenseNumber: "KNC-RN-77821",
+      yearsExperience: 6,
+      phone: nurseUsers[0].phone,
+      email: nurseUsers[0].email,
+      emergencyContactName: "Suresh Nair",
+      emergencyContactPhone: "+91 95555 22111",
+      notes: "Leads vitals capture, triage prep, and discharge education handoff."
     })
   ];
 
   const patients = [
     createPatient("patient-aasha", patientUsers[0].id, {
       fullName: "Aasha Verma",
-      preferredLanguage: "hi",
+      preferredLanguage: "en",
       age: 32,
       gender: "Female",
       city: "Bengaluru",
@@ -406,7 +434,7 @@ export function createSeedState() {
     }),
     createPatient("patient-meena", patientUsers[2].id, {
       fullName: "Meena Joshi",
-      preferredLanguage: "hi",
+      preferredLanguage: "en",
       age: 36,
       gender: "Female",
       city: "Bengaluru",
@@ -442,6 +470,19 @@ export function createSeedState() {
       city: "Bengaluru",
       phone: patientUsers[5].phone,
       email: patientUsers[5].email
+    }),
+    createPatient("patient-priya", patientUsers[6].id, {
+      fullName: "priya Nair",
+      preferredLanguage: "en",
+      age: 29,
+      gender: "Female",
+      city: "Bengaluru",
+      phone: patientUsers[6].phone,
+      email: patientUsers[6].email,
+      abhaNumber: "91-7744-5521-8890",
+      emergencyContactName: "Sandeep Nair",
+      emergencyContactPhone: "+91 98711 22558",
+      notes: "Seasonal fever and cough follow-up"
     })
   ];
 
@@ -496,12 +537,11 @@ export function createSeedState() {
     )
   ];
 
-  state.users = indexCollection([adminUser, labUser, ...doctorUsers, ...patientUsers]);
+  state.users = indexCollection([adminUser, ...doctorUsers, ...patientUsers, ...nurseUsers]);
   state.admins = indexCollection([adminProfile]);
-  state.labs = indexCollection([labProfile]);
   state.doctors = indexCollection(doctors);
+  state.nurses = indexCollection(nurses);
   state.patients = indexCollection(patients);
-  state.labCatalog = indexCollection(createLabCatalogSeed());
   state.scheduleTemplates = indexCollection(templates);
   state.scheduleOverrides = indexCollection([
     {
@@ -540,13 +580,13 @@ export function createSeedState() {
       startAt: toIsoDateTime(today, "09:15"),
       endAt: toIsoDateTime(today, "09:30"),
       encounterStatus: "ai_ready",
-      language: "hi",
+      language: "en",
       interviewStatus: "complete",
       transcript: [
-        { role: "ai", text: "नमस्ते, आज किस परेशानी के लिए आए हैं?" },
-        { role: "patient", text: "पिछले दो दिन से पेट में जलन और उलझन है।" },
-        { role: "ai", text: "क्या खाना खाने के बाद बढ़ता है?" },
-        { role: "patient", text: "हाँ, खासकर मसालेदार खाना खाने के बाद।" }
+        { role: "ai", text: "Hello, what concern brings you in today?" },
+        { role: "patient", text: "I have had stomach burning and discomfort for the last two days." },
+        { role: "ai", text: "Does it worsen after meals?" },
+        { role: "patient", text: "Yes, especially after spicy food." }
       ],
       extractedFindings: ["Epigastric burning", "Post-meal worsening", "Nausea"],
       draft: {
@@ -588,14 +628,23 @@ export function createSeedState() {
             rationale: "Rapid relief of burning"
           }
         ],
-        differentials: ["GERD", "Acute dyspepsia", "Peptic irritation"],
-        labSuggestions: [
-          { testId: "lab-cbc", reason: "Screen if gastritis symptoms are persistent or associated with weakness." },
-          { testId: "lab-lft", reason: "Rule out upper abdominal overlap if symptoms evolve beyond acidity." }
-        ]
+        differentials: ["GERD", "Acute dyspepsia", "Peptic irritation"]
       }
     })
   );
+
+  upsertEntity(state.labReports, {
+    id: "lab-appointment-rohan",
+    appointmentId: "appointment-rohan",
+    patientId: "patient-rohan",
+    doctorId: "doctor-raman",
+    title: "Hypertension follow-up panel",
+    category: "Vitals + Clinical Chemistry",
+    findings: "BP remains elevated; suggest repeat BP log review and baseline renal profile for therapy optimization.",
+    resultSummary: "Borderline uncontrolled blood pressure trends. Lifestyle and medication adherence reinforced.",
+    status: "final",
+    updatedAt: toIsoDateTime(today, "10:32")
+  });
 
   addAppointmentBundle(
     state,
@@ -647,11 +696,7 @@ export function createSeedState() {
             rationale: "Maintain BP control"
           }
         ],
-        differentials: ["White coat effect", "Essential hypertension"],
-        labSuggestions: [
-          { testId: "lab-hba1c", reason: "Cardio-metabolic review during hypertension follow-up." },
-          { testId: "lab-lipid", reason: "Assess lipid risk while adjusting long-term BP care." }
-        ]
+        differentials: ["White coat effect", "Essential hypertension"]
       },
       review: {
         draftId: "draft-appointment-rohan",
@@ -691,7 +736,7 @@ export function createSeedState() {
       startAt: toIsoDateTime(tomorrow, "11:15"),
       endAt: toIsoDateTime(tomorrow, "11:30"),
       encounterStatus: "awaiting_interview",
-      language: "hi",
+      language: "en",
       interviewStatus: "pending",
       transcript: [],
       extractedFindings: [],
@@ -757,12 +802,71 @@ export function createSeedState() {
           }
         ],
         differentials: ["Sleep deprivation", "Metabolic fatigue", "Diabetes-related fatigue"]
-        ,
-        labSuggestions: [
-          { testId: "lab-cbc", reason: "Fatigue workup should screen anemia or infection." },
-          { testId: "lab-thyroid", reason: "Check thyroid causes for persistent low energy." },
-          { testId: "lab-vitd", reason: "Consider nutritional causes if fatigue is ongoing." }
-        ]
+      }
+    })
+  );
+
+  addAppointmentBundle(
+    state,
+    createAppointmentBundle({
+      id: "appointment-priya",
+      slotId: `slot-doctor-ali-${today}-10:00`,
+      doctorId: "doctor-ali",
+      patientId: "patient-priya",
+      bookedByUserId: patientUsers[6].id,
+      visitType: "booked",
+      bookingStatus: "scheduled",
+      token: "D07",
+      startAt: toIsoDateTime(today, "10:00"),
+      endAt: toIsoDateTime(today, "10:15"),
+      encounterStatus: "awaiting_interview",
+      language: "en",
+      interviewStatus: "pending",
+      transcript: [],
+      extractedFindings: [],
+      draft: {
+        ...emptyEncounterDraft("Pending symptom interview"),
+        id: "draft-appointment-priya",
+        appointmentId: "appointment-priya"
+      }
+    })
+  );
+
+  addAppointmentBundle(
+    state,
+    createAppointmentBundle({
+      id: "appointment-anika-farah",
+      slotId: `slot-doctor-ali-${tomorrow}-10:15`,
+      doctorId: "doctor-ali",
+      patientId: "patient-anika",
+      bookedByUserId: patientUsers[5].id,
+      visitType: "booked",
+      bookingStatus: "scheduled",
+      token: "D11",
+      startAt: toIsoDateTime(tomorrow, "10:15"),
+      endAt: toIsoDateTime(tomorrow, "10:30"),
+      encounterStatus: "ai_ready",
+      language: "en",
+      interviewStatus: "complete",
+      transcript: [
+        { role: "ai", text: "What symptoms are worrying you most today?" },
+        { role: "patient", text: "Low-grade fever with sore throat since yesterday." }
+      ],
+      extractedFindings: ["Low-grade fever", "Sore throat", "Since yesterday"],
+      draft: {
+        ...emptyEncounterDraft("Fever with sore throat"),
+        id: "draft-appointment-anika-farah",
+        appointmentId: "appointment-anika-farah",
+        soap: {
+          chiefComplaint: "Fever with sore throat",
+          subjective: "Low-grade fever and throat pain for one day, no breathing difficulty.",
+          objective: "No red-flag symptoms reported in interview; vitals to be confirmed in clinic.",
+          assessment: "Likely viral upper respiratory infection; clinician review needed.",
+          plan: "Hydration, symptomatic care guidance, and in-person examination by doctor."
+        },
+        confidenceMap: { subjective: 0.83, objective: 0.52, assessment: 0.71, plan: 0.76 },
+        alerts: ["Rule out bacterial infection if fever persists beyond 48-72 hours."],
+        diagnoses: [{ label: "Acute upper respiratory infection", code: "J06.9", confidence: 0.72 }]
       }
     })
   );
@@ -817,12 +921,7 @@ export function createSeedState() {
             rationale: "Hold changes until examination"
           }
         ],
-        differentials: ["Sleep-related fatigue", "Diabetes-related fatigue"],
-        labSuggestions: [
-          { testId: "lab-hba1c", reason: "Review medium-term diabetes control." },
-          { testId: "lab-fbs", reason: "Compare immediate glycemic status with symptoms." },
-          { testId: "lab-urine", reason: "Screen urine markers if diabetes symptoms are evolving." }
-        ]
+        differentials: ["Sleep-related fatigue", "Diabetes-related fatigue"]
       },
       review: {
         draftId: "draft-appointment-imran",
@@ -833,108 +932,6 @@ export function createSeedState() {
       }
     })
   );
-
-  upsertEntity(state.labOrders, {
-    id: "laborder-aasha",
-    appointmentId: "appointment-aasha",
-    patientId: "patient-aasha",
-    doctorId: "doctor-mehra",
-    createdByUserId: doctorUsers[0].id,
-    assignedLabUserId: labUser.id,
-    status: "ordered",
-    selectedTestIds: ["lab-cbc", "lab-lft"],
-    clinicianNote: "Screen ongoing acidity symptoms before final treatment changes.",
-    orderedAt: toIsoDateTime(today, "09:05"),
-    sampleReceivedAt: null,
-    processingStartedAt: null,
-    completedAt: null,
-    cancelledAt: null,
-    cancelledByUserId: null,
-    lastEditedAt: toIsoDateTime(today, "09:05"),
-    reportId: null
-  });
-  state.encounters.byId["encounter-appointment-aasha"] = {
-    ...state.encounters.byId["encounter-appointment-aasha"],
-    labOrderIds: ["laborder-aasha"]
-  };
-
-  upsertEntity(state.labOrders, {
-    id: "laborder-rohan",
-    appointmentId: "appointment-rohan",
-    patientId: "patient-rohan",
-    doctorId: "doctor-raman",
-    createdByUserId: doctorUsers[1].id,
-    assignedLabUserId: labUser.id,
-    status: "completed",
-    selectedTestIds: ["lab-hba1c", "lab-lipid"],
-    clinicianNote: "Review cardio-metabolic risk profile during hypertension follow-up.",
-    orderedAt: toIsoDateTime(today, "10:10"),
-    sampleReceivedAt: toIsoDateTime(today, "10:25"),
-    processingStartedAt: toIsoDateTime(today, "10:40"),
-    completedAt: toIsoDateTime(today, "13:15"),
-    cancelledAt: null,
-    cancelledByUserId: null,
-    lastEditedAt: toIsoDateTime(today, "10:12"),
-    reportId: "labreport-rohan"
-  });
-  upsertEntity(state.labReports, {
-    id: "labreport-rohan",
-    labOrderId: "laborder-rohan",
-    patientId: "patient-rohan",
-    doctorId: "doctor-raman",
-    resultItems: [
-      {
-        testId: "lab-hba1c",
-        name: "HbA1c",
-        result: "7.4",
-        unit: "%",
-        referenceRange: "Below 5.7",
-        flag: "high"
-      },
-      {
-        testId: "lab-lipid",
-        name: "Lipid Profile",
-        result: "LDL 138",
-        unit: "mg/dL",
-        referenceRange: "Below 100",
-        flag: "high"
-      }
-    ],
-    summary: "Raised HbA1c and LDL suggest tighter chronic disease follow-up is needed.",
-    completedByUserId: labUser.id,
-    completedAt: toIsoDateTime(today, "13:15"),
-    downloadMeta: {
-      fileName: "nira-lab-report-rohan.pdf"
-    }
-  });
-  state.encounters.byId["encounter-appointment-rohan"] = {
-    ...state.encounters.byId["encounter-appointment-rohan"],
-    labOrderIds: ["laborder-rohan"]
-  };
-
-  upsertEntity(state.labOrders, {
-    id: "laborder-pranav",
-    appointmentId: "appointment-pranav",
-    patientId: "patient-pranav",
-    doctorId: "doctor-mehra",
-    createdByUserId: doctorUsers[0].id,
-    assignedLabUserId: labUser.id,
-    status: "ordered",
-    selectedTestIds: ["lab-cbc", "lab-thyroid", "lab-vitd"],
-    clinicianNote: "Fatigue workup requested before the next treatment decision.",
-    orderedAt: toIsoDateTime(dayAfter, "09:30"),
-    sampleReceivedAt: null,
-    processingStartedAt: null,
-    completedAt: null,
-    cancelledAt: null,
-    cancelledByUserId: null,
-    lastEditedAt: toIsoDateTime(dayAfter, "09:30"),
-    reportId: null
-  });
-  state.encounters.byId["encounter-appointment-pranav"] = {
-    ...state.encounters.byId["encounter-appointment-pranav"],
-    labOrderIds: ["laborder-pranav"]
-  };
 
   syncAllDoctorDaySchedules(state, today, 30);
   state.ui.lastViewedAppointmentId = "appointment-aasha";

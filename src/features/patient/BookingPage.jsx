@@ -1,30 +1,66 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { CalendarClock, CheckCircle2, Stethoscope } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { CalendarCheck2, CalendarClock, CheckCircle2, FileText, Star, UserCircle2 } from "lucide-react";
 import { AppShell } from "../../components/layout/AppShell";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card, CardHeader } from "../../components/ui/Card";
-import { Field, Select } from "../../components/ui/FormFields";
-import { LanguageToggle } from "../../components/ui/LanguageToggle";
+import { Field, Input, Select } from "../../components/ui/FormFields";
 import { useDemoData } from "../../app/DemoDataProvider";
 import { getBookableDoctors, getPatientWorkspace, getScheduleByDate } from "../shared/selectors";
 import { formatDate, formatDayKey, formatTime } from "../../lib/format";
 import { getDateRange } from "../../lib/schedule";
 import { usePatientLanguage } from "./usePatientLanguage";
 
+function getDoctorRating(doctorId) {
+  if (!doctorId) {
+    return "4.8";
+  }
+
+  const tail = doctorId.charCodeAt(doctorId.length - 1) % 3;
+  return (4.7 + tail * 0.1).toFixed(1);
+}
+
 export function BookingPage() {
   const { state, session, actions } = useDemoData();
-  const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { patient } = getPatientWorkspace(state);
-  const [language, setLanguage] = usePatientLanguage(patient?.preferredLanguage || "en");
-  const doctors = useMemo(() => getBookableDoctors(state), [state]);
-  const requestedDoctorId = searchParams.get("doctorId");
+  const [language] = usePatientLanguage(patient?.preferredLanguage || "en");
+  const preferredDoctorId = searchParams.get("doctorId") || "";
+  const rescheduleAppointmentId = searchParams.get("rescheduleAppointmentId") || "";
+  const rescheduleAppointment = rescheduleAppointmentId ? state.appointments.byId[rescheduleAppointmentId] || null : null;
+  const isRescheduleMode = Boolean(rescheduleAppointment);
+  const doctors = useMemo(() => {
+    const bookableDoctors = getBookableDoctors(state);
+    const lockedDoctorId = isRescheduleMode ? rescheduleAppointment?.doctorId : preferredDoctorId;
+
+    if (!lockedDoctorId) {
+      return bookableDoctors;
+    }
+
+    if (bookableDoctors.some((entry) => entry.id === lockedDoctorId)) {
+      return bookableDoctors;
+    }
+
+    const lockedDoctor = state.doctors.byId[lockedDoctorId];
+    if (!lockedDoctor) {
+      return bookableDoctors;
+    }
+
+    return [
+      {
+        ...lockedDoctor,
+        nextSchedule: null,
+        nextAvailableSlot: null,
+        availabilityLabel: "No live online slots right now"
+      },
+      ...bookableDoctors
+    ];
+  }, [isRescheduleMode, preferredDoctorId, rescheduleAppointment?.doctorId, state]);
   const [selectedDoctorId, setSelectedDoctorId] = useState(
-    doctors.some((item) => item.id === requestedDoctorId) ? requestedDoctorId : doctors[0]?.id || ""
+    () => (isRescheduleMode ? rescheduleAppointment?.doctorId : preferredDoctorId) || ""
   );
-  const [selectedDate, setSelectedDate] = useState(state.meta.today);
+  const [selectedDate, setSelectedDate] = useState("");
   const [selectedSlotId, setSelectedSlotId] = useState("");
   const [visitType, setVisitType] = useState("booked");
   const [submitting, setSubmitting] = useState(false);
@@ -40,35 +76,44 @@ export function BookingPage() {
             schedule: getScheduleByDate(state, doctor.id, date)
           }))
         : [],
-    [state, doctor, dateOptions]
+    [dateOptions, doctor, state]
   );
   const selectedSchedule = doctor ? getScheduleByDate(state, doctor.id, selectedDate) : null;
+  const selectedSlot = selectedSchedule?.slots.find((slot) => slot.id === selectedSlotId) || null;
   const confirmationBundle = confirmationId ? state.appointments.byId[confirmationId] : null;
+  const visibleDoctors = isRescheduleMode && doctor
+    ? [doctor]
+    : selectedDoctorId
+      ? doctors.filter((entry) => entry.id === selectedDoctorId)
+      : doctors;
 
   useEffect(() => {
-    if (requestedDoctorId && doctors.some((item) => item.id === requestedDoctorId)) {
-      setSelectedDoctorId(requestedDoctorId);
-      return;
-    }
+    const lockedDoctorId = isRescheduleMode ? rescheduleAppointment?.doctorId : preferredDoctorId;
 
-    if (!doctors.some((item) => item.id === selectedDoctorId)) {
-      setSelectedDoctorId(doctors[0]?.id || "");
+    if (lockedDoctorId && doctors.some((entry) => entry.id === lockedDoctorId)) {
+      setSelectedDoctorId(lockedDoctorId);
     }
-  }, [requestedDoctorId, doctors, selectedDoctorId]);
+  }, [doctors, isRescheduleMode, preferredDoctorId, rescheduleAppointment?.doctorId]);
 
   useEffect(() => {
     if (!doctor) {
+      setSelectedDate("");
+      setSelectedSlotId("");
       return;
     }
 
     const nextWithAvailability = schedules.find((entry) => entry.schedule?.slotSummary.available > 0);
-    setSelectedDate(nextWithAvailability?.date || state.meta.today);
-  }, [doctor?.id]);
+    const preferredDate = isRescheduleMode && rescheduleAppointment?.doctorId === doctor.id
+      ? nextWithAvailability?.date || state.meta.today
+      : nextWithAvailability?.date || state.meta.today;
+
+    setSelectedDate(preferredDate);
+    setSelectedSlotId("");
+  }, [doctor?.id, isRescheduleMode, rescheduleAppointment?.doctorId, schedules, state.meta.today]);
 
   useEffect(() => {
-    const nextAvailable = selectedSchedule?.slots.find((slot) => slot.status === "available");
-    setSelectedSlotId(nextAvailable?.id || "");
-  }, [selectedDate, selectedSchedule?.id, selectedDoctorId]);
+    setSelectedSlotId("");
+  }, [selectedDate, selectedDoctorId, selectedSchedule?.id]);
 
   async function handleBooking() {
     if (!selectedSlotId || !doctor) {
@@ -76,200 +121,259 @@ export function BookingPage() {
     }
 
     setSubmitting(true);
-    const snapshot = await actions.booking.bookAppointment({
-      patientId: patient.id,
-      doctorId: doctor.id,
-      slotId: selectedSlotId,
-      date: selectedDate,
-      bookedByUserId: session.userId,
-      visitType,
-      language
-    });
-    setConfirmationId(snapshot.ui.lastViewedAppointmentId);
-    setSubmitting(false);
+
+    try {
+      if (isRescheduleMode && rescheduleAppointment) {
+        await actions.booking.rescheduleAppointment(rescheduleAppointment.id, {
+          doctorId: doctor.id,
+          date: selectedDate,
+          slotId: selectedSlotId
+        });
+        setConfirmationId(rescheduleAppointment.id);
+        return;
+      }
+
+      const snapshot = await actions.booking.bookAppointment({
+        patientId: patient.id,
+        doctorId: doctor.id,
+        slotId: selectedSlotId,
+        date: selectedDate,
+        bookedByUserId: session.userId,
+        visitType,
+        language
+      });
+
+      setConfirmationId(snapshot.ui.lastViewedAppointmentId);
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   return (
     <AppShell
       title="Book by live doctor slots"
-      subtitle="Choose an active doctor, review the next 14 days of availability, and confirm only from open slots."
-      languageLabel="Patient booking in English / Hindi"
+      subtitle={
+        isRescheduleMode
+          ? "Reschedule with the same doctor by picking a fresh live slot."
+          : "Doctor cards, live teal slots, and a one-tap confirmation flow."
+      }
     >
-      <div className="space-y-6">
-        <div className="grid gap-6 lg:grid-cols-[1.08fr_0.92fr]">
-          <Card>
-            <CardHeader
-              eyebrow="Step 1"
-              title="Choose your doctor"
-              description="Only active doctors who are currently accepting appointments appear here."
-            />
-            <div className="grid gap-4 md:grid-cols-2">
-              {doctors.map((entry) => (
+      <div className="space-y-4">
+        <Card density="compact">
+          <CardHeader
+            eyebrow="Doctor list"
+            title={isRescheduleMode ? "Same doctor, fresh slot" : "Choose your doctor"}
+            description={
+              isRescheduleMode
+                ? "This reschedule flow keeps the original doctor and only updates the slot."
+                : "Goal: 30-second booking"
+            }
+          />
+          {selectedDoctorId && !isRescheduleMode ? (
+            <div className="mb-3 flex justify-end">
+              <Button type="button" variant="secondary" size="sm" onClick={() => setSelectedDoctorId("")}>
+                Change doctor
+              </Button>
+            </div>
+          ) : null}
+          {isRescheduleMode && doctor ? (
+            <div className="mb-3 rounded-2xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-950">
+              Rescheduling stays with <span className="font-semibold">{doctor.fullName}</span>. To change doctors, book a new appointment instead of rescheduling this one.
+            </div>
+          ) : null}
+          <div className={`grid gap-3 ${selectedDoctorId ? "" : "lg:grid-cols-2"}`}>
+            {visibleDoctors.map((entry) => {
+              const quickSlots = getDateRange(state.meta.today, 14)
+                .map((date) => getScheduleByDate(state, entry.id, date))
+                .flatMap((schedule) => (schedule?.slots || []).filter((slot) => slot.status === "available"))
+                .slice(0, 3);
+              const isSelected = selectedDoctorId === entry.id;
+
+              return (
                 <button
                   key={entry.id}
                   type="button"
-                  onClick={() => setSelectedDoctorId(entry.id)}
-                  className={`rounded-[24px] border p-5 text-left transition ${
-                    selectedDoctorId === entry.id ? "border-cyan-300 bg-brand-mint shadow-soft" : "border-line bg-surface-2 hover:bg-white"
+                  onClick={() => {
+                    if (!isRescheduleMode) {
+                      setSelectedDoctorId(entry.id);
+                    }
+                  }}
+                  className={`rounded-2xl border p-4 text-left transition ${
+                    isSelected
+                      ? "border-brand-sky bg-brand-mint p-5 shadow-soft ring-2 ring-brand-sky/30"
+                      : "border-line bg-surface-2 hover:bg-white"
                   }`}
+                  disabled={isRescheduleMode}
                 >
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="text-base font-semibold text-ink">{entry.fullName}</div>
-                      <div className="mt-1 text-sm text-muted">{entry.specialty}</div>
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <div className="rounded-xl bg-white p-2 text-brand-tide shadow-sm">
+                        <UserCircle2 className="h-5 w-5" />
+                      </div>
+                      <div>
+                        <div className="text-base font-semibold text-ink">{entry.fullName}</div>
+                        <div className="mt-1 text-sm text-muted">{entry.specialty || "General"}</div>
+                      </div>
                     </div>
-                    <Stethoscope className="h-5 w-5 text-brand-tide" />
+                    <div className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 text-xs font-semibold text-ink">
+                      <Star className="h-3.5 w-3.5 text-amber-500" /> {getDoctorRating(entry.id)}
+                    </div>
                   </div>
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    <Badge tone={entry.nextAvailableSlot ? "success" : "warning"}>
-                      {entry.availabilityLabel}
-                    </Badge>
-                    {entry.nextAvailableSlot ? (
-                      <Badge tone="info">
-                        Next: {formatDayKey(entry.nextAvailableSlot.date)} {formatTime(entry.nextAvailableSlot.startAt)}
-                      </Badge>
-                    ) : null}
+
+                  <div className="mt-3 flex flex-wrap gap-2" aria-hidden="true">
+                    {quickSlots.length ? (
+                      quickSlots.map((slot) => (
+                        <span
+                          key={slot.id}
+                          className="rounded-full bg-brand-sky px-2.5 py-1 text-[11px] font-semibold text-white"
+                        >
+                          {formatTime(slot.startAt)}
+                        </span>
+                      ))
+                    ) : (
+                      <Badge tone="warning">FULL</Badge>
+                    )}
                   </div>
                 </button>
-              ))}
-            </div>
-          </Card>
+              );
+            })}
+          </div>
+        </Card>
 
-          <Card>
-            <CardHeader
-              eyebrow="Step 2"
-              title="Booking preferences"
-              description="Pick the interview language and visit type before confirming the slot."
-            />
-            <div className="grid gap-4">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="pill">Booking for {patient.fullName}</div>
-                <LanguageToggle value={language} onChange={setLanguage} />
-              </div>
-              <Field label="Visit type">
-                <Select value={visitType} onChange={(event) => setVisitType(event.target.value)}>
-                  <option value="booked">Booked</option>
-                  <option value="walk_in">Walk-in</option>
-                </Select>
-              </Field>
-              <div className="rounded-[24px] border border-line bg-surface-2 p-5 text-sm leading-6 text-muted">
-                After booking, NIRA creates a pending interview and encounter skeleton immediately so the APCI flow can continue without backend integration.
-              </div>
-            </div>
-          </Card>
-        </div>
-
-        <Card>
+        <Card density="compact">
           <CardHeader
-            eyebrow="Step 3"
-            title="Choose date and slot"
-            description="See the next 14 days from the selected doctor's resolved schedule, including booked and unavailable states."
+            eyebrow="Pick date & slot"
+            title="Live availability"
+            description="Only available slots can be selected."
           />
-          <div className="space-y-5">
-            <div className="flex flex-wrap gap-2">
-              {schedules.map(({ date, schedule }) => (
-                <button
-                  key={date}
-                  type="button"
-                  onClick={() => setSelectedDate(date)}
-                  className={`rounded-full border px-4 py-2 text-sm font-semibold transition ${
-                    selectedDate === date
-                      ? "border-cyan-300 bg-brand-mint text-ink"
-                      : "border-line bg-white/80 text-muted hover:bg-white"
-                  }`}
-                >
-                  {formatDate(`${date}T00:00:00+05:30`)}{" "}
-                  {schedule?.slotSummary.available ? `(${schedule.slotSummary.available})` : "(0)"}
-                </button>
-              ))}
+          <div className="space-y-4">
+            <div className="-mx-1 overflow-x-auto px-1 pb-1">
+              <div className="inline-flex min-w-full gap-2 sm:flex sm:flex-wrap">
+                {schedules.map(({ date, schedule }) => (
+                  <button
+                    key={date}
+                    type="button"
+                    onClick={() => setSelectedDate(date)}
+                    className={`whitespace-nowrap rounded-full border px-3 py-2 text-sm font-semibold transition sm:px-4 ${
+                      selectedDate === date
+                        ? "border-brand-sky bg-brand-mint text-ink"
+                        : "border-line bg-white text-muted hover:bg-surface-2"
+                    }`}
+                  >
+                    {formatDayKey(date)} ({schedule?.slotSummary.available || 0})
+                  </button>
+                ))}
+              </div>
             </div>
 
-            <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
               {(selectedSchedule?.slots || []).map((slot) => (
                 <button
                   key={slot.id}
                   type="button"
                   disabled={slot.status !== "available"}
                   onClick={() => setSelectedSlotId(slot.id)}
-                  className={`rounded-[22px] border px-4 py-4 text-left transition ${
+                  className={`rounded-xl border px-2.5 py-2.5 text-xs font-semibold transition sm:px-3 sm:text-sm ${
                     selectedSlotId === slot.id
-                      ? "border-cyan-300 bg-brand-mint"
+                      ? "border-brand-sky bg-brand-sky text-white"
                       : slot.status === "available"
-                        ? "border-emerald-200 bg-emerald-50 hover:-translate-y-0.5"
-                        : slot.status === "booked"
-                          ? "border-cyan-200 bg-cyan-50 text-cyan-900"
-                          : "border-amber-200 bg-amber-50 text-amber-900"
-                  } disabled:cursor-not-allowed disabled:opacity-100`}
+                        ? "border-cyan-200 bg-cyan-50 text-ink hover:-translate-y-0.5"
+                        : "border-line bg-surface-2 text-muted"
+                  } disabled:cursor-not-allowed disabled:opacity-80`}
                 >
-                  <div className="text-sm font-semibold">
-                    {formatTime(slot.startAt)} - {formatTime(slot.endAt)}
-                  </div>
-                  <div className="mt-2 text-xs uppercase tracking-[0.18em] opacity-70">{slot.status}</div>
+                  {formatTime(slot.startAt)} - {formatTime(slot.endAt)}
                 </button>
               ))}
             </div>
-
-            {!selectedSchedule?.slots?.length ? (
-              <div className="rounded-[24px] border border-dashed border-line bg-surface-2 p-6 text-sm text-muted">
-                This day has no generated slots. Choose another date or a different doctor.
-              </div>
-            ) : null}
           </div>
         </Card>
 
-        <Card>
-          <CardHeader
-            eyebrow="Step 4"
-            title={confirmationBundle ? "Appointment created" : "Confirm appointment"}
-            description={
-              confirmationBundle
-                ? "The booking, interview shell, and encounter shell are now ready."
-                : "Only available slots can be confirmed. Booked and unavailable slots stay disabled."
-            }
-          />
-          {confirmationBundle ? (
-            <div className="space-y-4">
-              <div className="rounded-[24px] border border-emerald-200 bg-emerald-50 p-5">
-                <div className="flex items-start gap-3">
-                  <CheckCircle2 className="mt-1 h-5 w-5 text-emerald-700" />
-                  <div>
-                    <div className="text-sm font-semibold text-emerald-900">
-                      Token {confirmationBundle.token} confirmed
-                    </div>
-                    <div className="mt-1 text-sm text-emerald-800">
-                      Your slot is booked for {formatDate(confirmationBundle.startAt)} at {formatTime(confirmationBundle.startAt)}.
-                    </div>
+        <div className="grid gap-4 lg:grid-cols-[1fr_auto] lg:items-start">
+          <Card density="compact">
+            <CardHeader
+              eyebrow="Summary"
+              title={doctor && selectedSlot ? `${doctor.fullName} - ${formatTime(selectedSlot.startAt)}` : "Select doctor and slot"}
+              description="Minimal patient form, prefilled from profile."
+            />
+            <div className="grid gap-4 md:grid-cols-2">
+              <Field label="Name">
+                <Input value={patient?.fullName || ""} readOnly />
+              </Field>
+              <Field label="Phone">
+                <Input value={patient?.phone || ""} readOnly />
+              </Field>
+              {isRescheduleMode ? (
+                <div className="rounded-xl border border-cyan-200 bg-cyan-50 p-4 text-sm text-cyan-950">
+                  This will update the current appointment instead of creating a second booking.
+                </div>
+              ) : (
+                <Field label="Visit type">
+                  <Select value={visitType} onChange={(event) => setVisitType(event.target.value)}>
+                    <option value="booked">Booked</option>
+                    <option value="walk_in">Walk-in</option>
+                  </Select>
+                </Field>
+              )}
+              <div className="rounded-xl border border-line bg-surface-2 p-4 text-sm text-muted">
+                {doctor ? (
+                  <>
+                    {doctor.fullName} · {selectedDate ? formatDate(`${selectedDate}T00:00:00+05:30`) : "Select date"}
+                    {selectedSlot ? ` · ${formatTime(selectedSlot.startAt)}` : ""}
+                  </>
+                ) : (
+                  "Choose a doctor and slot to continue."
+                )}
+              </div>
+            </div>
+          </Card>
+
+          <div className="space-y-3">
+            <Button onClick={handleBooking} disabled={!selectedSlotId || submitting} className="w-full sm:min-w-[220px]">
+              <CalendarCheck2 className="h-4 w-4" />
+              {submitting
+                ? isRescheduleMode
+                  ? "Rescheduling appointment..."
+                  : "Creating appointment..."
+                : isRescheduleMode
+                  ? "Confirm reschedule"
+                  : "Confirm slot"}
+            </Button>
+            <Button asChild variant="secondary" className="w-full sm:min-w-[220px]">
+              <Link to="/patient/appointments">
+                <CalendarClock className="h-4 w-4" />
+                View appointments
+              </Link>
+            </Button>
+          </div>
+        </div>
+
+        {confirmationBundle ? (
+          <Card density="compact" className="border-emerald-200 bg-emerald-50">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <div className="rounded-full bg-white p-2 text-emerald-700">
+                  <CheckCircle2 className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="text-base font-semibold text-emerald-900">
+                    {isRescheduleMode ? "Appointment rescheduled" : "Appointment created"}
+                  </div>
+                  <div className="text-sm text-emerald-800">
+                    Token {confirmationBundle.token} confirmed for {formatDate(confirmationBundle.startAt)} at {formatTime(confirmationBundle.startAt)}
                   </div>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-3">
-                <Button onClick={() => navigate(`/patient/interview/${confirmationBundle.id}`)}>Start AI interview</Button>
-                <Button asChild variant="secondary">
-                  <Link to={`/patient/appointments/${confirmationBundle.id}?bucket=action`}>View appointment detail</Link>
-                </Button>
-                <Button asChild variant="secondary">
-                  <Link to="/patient">Back home</Link>
+              <div className="flex flex-wrap gap-2">
+                <Button asChild>
+                  <Link to={`/patient/appointments/${confirmationBundle.id}?bucket=${isRescheduleMode ? "upcoming" : "action"}`}>
+                    <FileText className="h-4 w-4" />
+                    Open appointment
+                  </Link>
                 </Button>
               </div>
             </div>
-          ) : (
-            <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-center">
-              <div className="rounded-[24px] border border-line bg-surface-2 p-5 text-sm text-muted">
-                {doctor ? (
-                  <>
-                    Booking with <span className="font-semibold text-ink">{doctor.fullName}</span> on{" "}
-                    <span className="font-semibold text-ink">{formatDate(`${selectedDate}T00:00:00+05:30`)}</span>.
-                  </>
-                ) : (
-                  "Select a doctor to continue."
-                )}
-              </div>
-              <Button onClick={handleBooking} disabled={!selectedSlotId || submitting}>
-                {submitting ? "Creating appointment..." : "Confirm slot"}
-              </Button>
-            </div>
-          )}
-        </Card>
+          </Card>
+        ) : null}
       </div>
     </AppShell>
   );

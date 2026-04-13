@@ -100,10 +100,10 @@ const doctorSeeds = [
     consultationMode: "opd",
     slotDurationMinutes: 15,
     bufferMinutes: 0,
-    bio: "Recently self-registered doctor waiting for approval.",
+    bio: "General medicine consultant for first-line OPD care and follow-up visits.",
     email: "farah.ali@nira.local",
-    acceptingAppointments: false,
-    status: "pending_approval",
+    acceptingAppointments: true,
+    status: "active",
     weeklyRules: {
       monday: enabledDay(["10:00-14:00"]),
       tuesday: enabledDay(["10:00-14:00"]),
@@ -124,7 +124,8 @@ const patientSeeds = [
   patientSeed("anika-das", "Anika Das", 8, "Female", "+91 98112 14567", "Bengaluru", "en", false, null, "Viral URI"),
   patientSeed("imran-sheikh", "Imran Sheikh", 55, "Male", "+91 97654 31209", "Bengaluru", "en", true, "91-3124-1876-9990", "Type 2 diabetes"),
   patientSeed("meena-joshi", "Meena Joshi", 36, "Female", "+91 91230 44322", "Bengaluru", "hi", true, "91-5501-7610-8872", "Dermatitis"),
-  patientSeed("pranav-sen", "Pranav Sen", 34, "Male", "+91 98444 21009", "Bengaluru", "en", true, "91-3355-9012-3334", "Fatigue workup")
+  patientSeed("pranav-sen", "Pranav Sen", 34, "Male", "+91 98444 21009", "Bengaluru", "en", true, "91-3355-9012-3334", "Fatigue workup"),
+  patientSeed("priya-nair", "Priya Nair", 29, "Female", "+91 98711 22559", "Bengaluru", "en", true, "91-7744-5521-8890", "Seasonal fever follow-up")
 ];
 
 const appointmentSeeds = [
@@ -264,6 +265,73 @@ const appointmentSeeds = [
       extractedFindings: ["Fatigue", "Poor sleep", "Ten days duration"]
     },
     apciDraft: fatigueDraft(),
+    doctorReview: emptyReview(),
+    finalClinicalNote: null,
+    approvedAt: null
+  },
+  {
+    slug: "priya-general-medicine",
+    numberSuffix: "006",
+    doctorSlug: "farah-ali",
+    patientSlug: "priya-nair",
+    dayOffset: 0,
+    startTime: "10:00",
+    visitType: "booked",
+    source: "patient_portal",
+    bookingStatus: "scheduled",
+    encounterStatus: "awaiting_interview",
+    notes: "New patient booked with Dr. Farah; interview pending.",
+    interview: {
+      language: "en",
+      completionStatus: "pending",
+      transcript: [],
+      extractedFindings: []
+    },
+    apciDraft: emptyDraft("Pending symptom interview"),
+    doctorReview: emptyReview(),
+    finalClinicalNote: null,
+    approvedAt: null
+  },
+  {
+    slug: "anika-farah-followup",
+    numberSuffix: "007",
+    doctorSlug: "farah-ali",
+    patientSlug: "anika-das",
+    dayOffset: 1,
+    startTime: "10:15",
+    visitType: "booked",
+    source: "patient_portal",
+    bookingStatus: "scheduled",
+    encounterStatus: "ai_ready",
+    notes: "Pre-check finished; waiting for Dr. Farah consultation.",
+    interview: {
+      language: "en",
+      completionStatus: "complete",
+      transcript: [
+        { role: "ai", text: "What symptoms are worrying you most today?" },
+        { role: "patient", text: "Low-grade fever with sore throat since yesterday." }
+      ],
+      extractedFindings: ["Low-grade fever", "Sore throat", "Since yesterday"]
+    },
+    apciDraft: {
+      ...emptyDraft("Fever with sore throat"),
+      soap: {
+        chiefComplaint: "Fever with sore throat",
+        subjective: "Low-grade fever and throat pain for one day, no breathing difficulty.",
+        objective: "No red-flag symptoms reported in interview; vitals to be confirmed in clinic.",
+        assessment: "Likely viral upper respiratory infection; clinician review needed.",
+        plan: "Hydration, symptomatic care guidance, and in-person examination by doctor."
+      },
+      diagnoses: [{ label: "Acute upper respiratory infection", code: "J06.9", confidence: 0.72 }],
+      confidenceMap: {
+        subjective: 0.83,
+        objective: 0.52,
+        assessment: 0.71,
+        plan: 0.76
+      },
+      alerts: ["Rule out bacterial infection if fever persists beyond 48-72 hours."],
+      medicationSuggestions: []
+    },
     doctorReview: emptyReview(),
     finalClinicalNote: null,
     approvedAt: null
@@ -778,7 +846,7 @@ function emptyDraft(chiefComplaint) {
       chiefComplaint,
       subjective: "Interview not completed yet.",
       objective: "Vitals and examination pending.",
-      assessment: "Awaiting interview before APCI can propose a strong assessment.",
+      assessment: "-",
       plan: "Prompt patient to complete AI interview before consultation."
     },
     vitals: {

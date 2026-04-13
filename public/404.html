@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NIRA Redirect</title>
+  </head>
+  <body>
+    <script>
+      (function () {
+        const pathSegments = window.location.pathname.split("/").filter(Boolean);
+        const basePath =
+          window.location.hostname.endsWith("github.io") && pathSegments.length
+            ? `/${pathSegments[0]}`
+            : "";
+        const relativePath =
+          basePath && window.location.pathname.startsWith(basePath)
+            ? window.location.pathname.slice(basePath.length)
+            : window.location.pathname;
+        const destination = `${basePath || ""}/?__nira_redirect__=${encodeURIComponent(
+          `${relativePath}${window.location.search}${window.location.hash}`
+        )}`;
+
+        window.location.replace(destination);
+      })();
+    </script>
+  </body>
+</html>

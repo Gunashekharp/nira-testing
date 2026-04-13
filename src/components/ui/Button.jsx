@@ -3,13 +3,15 @@ import { cn } from "../../lib/utils";
 
 const variants = {
   primary:
-    "bg-brand-midnight text-white shadow-soft hover:bg-brand-tide focus-visible:ring-slate-900/20",
+    "bg-brand-midnight text-white shadow-md hover:shadow-lg hover:bg-[#0e3a4f] active:scale-[0.98] focus-visible:ring-slate-900/20",
   secondary:
-    "bg-white/80 text-ink hover:bg-white focus-visible:ring-cyan-200",
+    "bg-white text-ink border border-line/50 shadow-sm hover:bg-surface hover:shadow-md active:scale-[0.98] focus-visible:ring-cyan-200",
   ghost:
-    "bg-transparent text-brand-midnight hover:bg-slate-900/5 focus-visible:ring-slate-900/20",
+    "bg-transparent text-brand-midnight hover:bg-brand-mint/50 active:scale-[0.98] focus-visible:ring-slate-900/20",
   accent:
-    "bg-brand-amber text-brand-midnight hover:opacity-95 focus-visible:ring-amber-200"
+    "bg-gradient-to-r from-brand-sky to-brand-tide text-white shadow-md hover:shadow-glow active:scale-[0.98] focus-visible:ring-cyan-200",
+  danger:
+    "bg-brand-coral text-white shadow-sm hover:bg-red-600 active:scale-[0.98] focus-visible:ring-red-200"
 };
 
 const sizes = {
@@ -27,7 +29,7 @@ export function Button({
   ...props
 }) {
   const classes = cn(
-    "inline-flex items-center justify-center gap-2 rounded-full font-semibold transition duration-200 focus-visible:outline-none focus-visible:ring-4 disabled:pointer-events-none disabled:opacity-50",
+    "inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition-all duration-200 focus-visible:outline-none focus-visible:ring-4 disabled:pointer-events-none disabled:opacity-50 [&>svg]:h-4 [&>svg]:w-4 [&>svg]:shrink-0 [&>svg]:drop-shadow-sm",
     variants[variant],
     sizes[size],
     className

@@ -95,6 +95,7 @@ export function SignupPage() {
         await actions.auth.signupAdmin(form);
       }
 
+      await actions.refresh();
       navigate(getRoleHomePath(role), { replace: true });
     } catch (issue) {
       setError(issue.message);
@@ -110,7 +111,7 @@ export function SignupPage() {
           <CardHeader
             eyebrow="Signup"
             title={copy.title}
-            description="Only a few fields are truly needed for this frontend demo. Everything else can be added or edited later from the profile page."
+            description="Only a few fields are required to get started. Everything else can be added later from your profile."
           />
           <form className="grid gap-5" onSubmit={handleSubmit}>
             <div className="grid gap-4 md:grid-cols-2">
@@ -130,6 +131,8 @@ export function SignupPage() {
               </Field>
               <Field label="Email">
                 <Input
+                  required
+                  type="email"
                   value={form.email}
                   onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
                 />
@@ -146,15 +149,6 @@ export function SignupPage() {
 
             {role === "patient" ? (
               <div className="grid gap-4 md:grid-cols-2">
-                <Field label="Preferred language">
-                  <Select
-                    value={form.preferredLanguage}
-                    onChange={(event) => setForm((current) => ({ ...current, preferredLanguage: event.target.value }))}
-                  >
-                    <option value="en">English</option>
-                    <option value="hi">Hindi</option>
-                  </Select>
-                </Field>
                 <Field label="Age">
                   <Input
                     type="number"

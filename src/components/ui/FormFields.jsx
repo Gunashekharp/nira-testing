@@ -13,7 +13,7 @@ export function Field({ label, hint, children, className }) {
 }
 
 const baseControl =
-  "w-full rounded-2xl border border-line bg-surface-2 px-4 py-3 text-sm text-ink shadow-soft outline-none transition focus:border-brand-sky focus:ring-4 focus:ring-cyan-200";
+  "w-full rounded-2xl border border-line bg-surface-2 px-4 py-3 text-sm text-ink shadow-soft outline-none transition focus:border-brand-sky focus:ring-4 focus:ring-cyan-200 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-500 disabled:shadow-none";
 
 export function Input(props) {
   const { className, ...rest } = props;

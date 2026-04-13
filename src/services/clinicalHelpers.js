@@ -1,5 +1,4 @@
 import { uid } from "../lib/utils";
-import { getMedicationTimings } from "./medicationHelpers";
 
 const interviewBlueprints = {
   fever: {
@@ -11,15 +10,11 @@ const interviewBlueprints = {
         dosage: "650 mg",
         frequency: "Every 8 hours if fever",
         duration: "3 days",
-        rationale: "Fever symptom relief",
-        timings: ["morning", "afternoon", "night", "after_food"]
+        rationale: "Fever symptom relief"
       }
     ],
     differentials: ["Upper respiratory viral illness", "Influenza-like illness", "Early bacterial infection"],
-    alerts: ["Check for red flags such as breathlessness, dehydration, or persistent high fever."],
-    labSuggestions: [
-      { testId: "lab-cbc", reason: "Check infection burden if fever persists or looks more than self-limiting." }
-    ]
+    alerts: ["Check for red flags such as breathlessness, dehydration, or persistent high fever."]
   },
   cough: {
     diagnosis: { label: "Upper respiratory tract infection", code: "J06.9", confidence: 0.82 },
@@ -30,21 +25,18 @@ const interviewBlueprints = {
         dosage: "10 mg",
         frequency: "At night",
         duration: "5 days",
-        rationale: "Reduce allergy and cold symptoms",
-        timings: ["night"]
+        rationale: "Reduce allergy and cold symptoms"
       },
       {
         name: "Warm saline gargles",
         dosage: "As needed",
         frequency: "Three times daily",
         duration: "5 days",
-        rationale: "Supportive throat care",
-        timings: ["morning", "afternoon", "night"]
+        rationale: "Supportive throat care"
       }
     ],
     differentials: ["Allergic rhinitis", "Pharyngitis", "Viral URI"],
-    alerts: ["Escalate if cough is associated with chest pain or shortness of breath."],
-    labSuggestions: [{ testId: "lab-cbc", reason: "Consider CBC if symptoms are persistent or worsening." }]
+    alerts: ["Escalate if cough is associated with chest pain or shortness of breath."]
   },
   stomach: {
     diagnosis: { label: "Acute gastritis", code: "K29.00", confidence: 0.88 },
@@ -55,16 +47,11 @@ const interviewBlueprints = {
         dosage: "40 mg",
         frequency: "Before breakfast",
         duration: "5 days",
-        rationale: "Reduce acidity",
-        timings: ["morning", "before_food"]
+        rationale: "Reduce acidity"
       }
     ],
     differentials: ["GERD", "Dyspepsia", "Food intolerance"],
-    alerts: ["Review NSAID use and food triggers before confirming the plan."],
-    labSuggestions: [
-      { testId: "lab-cbc", reason: "Rule out anemia or inflammatory response if pain is persistent." },
-      { testId: "lab-lft", reason: "Consider LFT if symptoms suggest upper abdominal or hepatobiliary overlap." }
-    ]
+    alerts: ["Review NSAID use and food triggers before confirming the plan."]
   },
   headache: {
     diagnosis: { label: "Migraine without aura", code: "G43.0", confidence: 0.78 },
@@ -75,13 +62,11 @@ const interviewBlueprints = {
         dosage: "250 mg",
         frequency: "Twice daily after food",
         duration: "3 days",
-        rationale: "Short-course symptom relief",
-        timings: ["morning", "night", "after_food"]
+        rationale: "Short-course symptom relief"
       }
     ],
     differentials: ["Tension headache", "Migraine", "Sinus headache"],
-    alerts: ["Confirm there are no neurological red flags before closing the visit."],
-    labSuggestions: [{ testId: "lab-cbc", reason: "Consider CBC if fatigue, weakness, or infection symptoms coexist." }]
+    alerts: ["Confirm there are no neurological red flags before closing the visit."]
   },
   fatigue: {
     diagnosis: { label: "Fatigue, unspecified", code: "R53.83", confidence: 0.74 },
@@ -92,18 +77,11 @@ const interviewBlueprints = {
         dosage: "As advised",
         frequency: "Daily",
         duration: "5 days",
-        rationale: "Placeholder until clinician completes assessment",
-        timings: ["morning"]
+        rationale: "Placeholder until clinician completes assessment"
       }
     ],
     differentials: ["Sleep deprivation", "Metabolic fatigue", "Diabetes-related fatigue"],
-    alerts: ["Review chronic disease medication adherence and sleep routine."],
-    labSuggestions: [
-      { testId: "lab-cbc", reason: "Screen for anemia or infection as a fatigue contributor." },
-      { testId: "lab-thyroid", reason: "Check thyroid dysfunction in persistent fatigue." },
-      { testId: "lab-fbs", reason: "Screen glycemic status in unexplained low energy." },
-      { testId: "lab-b12", reason: "Assess nutritional causes of fatigue or neuropathic symptoms." }
-    ]
+    alerts: ["Review chronic disease medication adherence and sleep routine."]
   }
 };
 
@@ -114,8 +92,8 @@ export function emptyEncounterDraft(chiefComplaint = "Pending symptom interview"
       chiefComplaint,
       subjective: "Interview not completed yet.",
       objective: "Vitals and examination pending.",
-      assessment: "Awaiting interview before APCI can propose a strong assessment.",
-      plan: "Prompt patient to complete AI interview before consultation."
+      assessment: "-",
+      plan: "Prompt patient to complete pre-check before consultation."
     },
     vitals: {
       temperature: "Pending",
@@ -123,7 +101,7 @@ export function emptyEncounterDraft(chiefComplaint = "Pending symptom interview"
       bloodPressure: "Pending",
       spo2: "Pending"
     },
-    diagnoses: [{ label: "Interview pending", code: "R69", confidence: 0.2 }],
+    diagnoses: [{ label: "Awaiting AI pre-chart completion", code: "", confidence: 0 }],
     confidenceMap: {
       subjective: 0.1,
       objective: 0.1,
@@ -132,8 +110,7 @@ export function emptyEncounterDraft(chiefComplaint = "Pending symptom interview"
     },
     alerts: ["Interview incomplete. Doctor should gather history directly."],
     medicationSuggestions: [],
-    differentials: ["Needs clinician review"],
-    labSuggestions: []
+    differentials: ["Needs clinician review"]
   };
 }
 
@@ -178,13 +155,11 @@ export function mapInterviewToBlueprint(answers) {
         dosage: "As advised",
         frequency: "As needed",
         duration: "3 days",
-        rationale: "Placeholder APCI plan",
-        timings: ["morning"]
+        rationale: "Placeholder APCI plan"
       }
     ],
     differentials: ["Functional complaint", "Self-limiting illness", "Needs examination"],
-    alerts: ["Review allergies and current medicines before approval."],
-    labSuggestions: []
+    alerts: ["Review allergies and current medicines before approval."]
   };
 }
 
@@ -219,7 +194,6 @@ export function buildDraftFromAnswers(appointment, patient, answers, existingId 
       plan: 0.75
     },
     medicationSuggestions: blueprint.meds,
-    labSuggestions: blueprint.labSuggestions || [],
     alerts: [
       ...(answers.medications ? [`Review concurrent medications: ${answers.medications}.`] : ["No current medications reported."]),
       answers.allergies ? `Allergy caution: ${answers.allergies}.` : "No known allergies reported.",
@@ -240,8 +214,7 @@ export function buildPrescriptionFromDraft(appointment, draft, note = "") {
       dosage: item.dosage,
       frequency: item.frequency,
       duration: item.duration,
-      instructions: item.rationale,
-      timings: getMedicationTimings(item)
+      instructions: item.rationale
     })),
     warnings: draft.alerts,
     followUpNote: note || "Review again if symptoms persist beyond 5 days.",
