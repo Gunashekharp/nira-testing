@@ -1,21 +1,75 @@
 const DEFAULT_GUNA_EMR_BASE_URL = "http://localhost:3001";
-const DEFAULT_CDSS_BASE_URL = "http://localhost:8010";
-const REQUEST_TIMEOUT_MS = 2500;
+const DEFAULT_CDSS_BASE_URL = "http://localhost:3001";
+const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
+const CHAT_REQUEST_TIMEOUT_MS = 15000;
+const CDSS_REQUEST_TIMEOUT_MS = 12000;
+
+function canUseLocalhostFallback() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return ["localhost", "127.0.0.1"].includes(window.location.hostname);
+}
+
+function getBrowserOrigin() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  return String(window.location.origin || "").replace(/\/$/, "");
+}
+
+function resolveServiceBaseUrl(configuredBaseUrl, defaultBaseUrl) {
+  const trimmedBaseUrl = String(configuredBaseUrl || "").trim();
+  if (trimmedBaseUrl) {
+    return trimmedBaseUrl.replace(/\/$/, "");
+  }
+
+  if (canUseLocalhostFallback()) {
+    return String(defaultBaseUrl || "").replace(/\/$/, "");
+  }
+
+  return getBrowserOrigin();
+}
 
 function getBaseUrl() {
-  return (import.meta.env.VITE_GUNA_EMR_BASE_URL || DEFAULT_GUNA_EMR_BASE_URL).replace(/\/$/, "");
+  return resolveServiceBaseUrl(import.meta.env.VITE_GUNA_EMR_BASE_URL, DEFAULT_GUNA_EMR_BASE_URL);
 }
 
 function getCdssBaseUrl() {
-  return (import.meta.env.VITE_CDSS_BASE_URL || DEFAULT_CDSS_BASE_URL).replace(/\/$/, "");
+  return resolveServiceBaseUrl(import.meta.env.VITE_CDSS_BASE_URL, DEFAULT_CDSS_BASE_URL);
 }
 
-async function getJson(path) {
+function requireConfiguredBaseUrl(baseUrl, serviceName) {
+  if (baseUrl) {
+    return baseUrl;
+  }
+
+  throw new Error(`${serviceName} base URL is not configured for this deployment.`);
+}
+
+function buildRequestUrl(baseUrl, path) {
+  const normalizedPath = String(path || "").startsWith("/") ? String(path || "") : `/${String(path || "")}`;
+
+  if (/^https?:\/\//i.test(baseUrl)) {
+    return `${baseUrl}${normalizedPath}`;
+  }
+
+  if (typeof window !== "undefined") {
+    return new URL(`${baseUrl}${normalizedPath}`, window.location.origin).toString();
+  }
+
+  return `${baseUrl}${normalizedPath}`;
+}
+
+async function getJson(path, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const baseUrl = requireConfiguredBaseUrl(getBaseUrl(), "EMR");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${getBaseUrl()}${path}`, {
+    const response = await fetch(buildRequestUrl(baseUrl, path), {
       method: "GET",
       headers: {
         Accept: "application/json"
@@ -34,12 +88,13 @@ async function getJson(path) {
   }
 }
 
-async function postJson(path, body) {
+async function postJson(path, body, timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS) {
+  const baseUrl = requireConfiguredBaseUrl(getBaseUrl(), "EMR");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${getBaseUrl()}${path}`, {
+    const response = await fetch(buildRequestUrl(baseUrl, path), {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -60,11 +115,12 @@ async function postJson(path, body) {
 }
 
 async function postCdssJson(path, body) {
+  const baseUrl = requireConfiguredBaseUrl(getCdssBaseUrl(), "CDSS");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS * 2);
+  const timeout = setTimeout(() => controller.abort(), CDSS_REQUEST_TIMEOUT_MS);
 
   try {
-    const response = await fetch(`${getCdssBaseUrl()}${path}`, {
+    const response = await fetch(buildRequestUrl(baseUrl, path), {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
@@ -130,11 +186,15 @@ export async function chatWithGunaEmr({ messages, patientPhone }) {
   return postJson("/api/convert/symptom-chat", {
     messages,
     patientPhone
-  });
+  }, CHAT_REQUEST_TIMEOUT_MS);
 }
 
 export async function generatePrecheckQuestionsViaGunaEmr(payload) {
-  return postJson("/api/convert/precheck-questions", payload);
+  return postJson("/api/convert/precheck-questions", payload, CHAT_REQUEST_TIMEOUT_MS);
+}
+
+export async function generateAdaptivePrecheckTurnViaGunaEmr(payload) {
+  return postJson("/api/convert/precheck-question-turn", payload, CHAT_REQUEST_TIMEOUT_MS);
 }
 
 export async function generateCdssPrecheck({ patientId, encounterId, chiefComplaint = "", transcript = "" }) {
@@ -242,7 +302,7 @@ export async function chatWithContextGunaEmr({
     role,
     language: "en",
     contextKey
-  });
+  }, CHAT_REQUEST_TIMEOUT_MS);
 }
 
 export async function submitSymptomChatToEmr({
@@ -262,15 +322,16 @@ export async function submitSymptomChatToEmr({
     role,
     language: "en",
     contextKey
-  });
+  }, CHAT_REQUEST_TIMEOUT_MS);
 }
 
 export async function fetchSymptomChatMemory({ contextKey, userId, role, patientPhone }) {
+  const baseUrl = requireConfiguredBaseUrl(getBaseUrl(), "EMR");
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timeout = setTimeout(() => controller.abort(), DEFAULT_REQUEST_TIMEOUT_MS);
 
   try {
-    const url = new URL(`${getBaseUrl()}/api/convert/symptom-chat/memory`);
+    const url = new URL(buildRequestUrl(baseUrl, "/api/convert/symptom-chat/memory"));
     if (contextKey) url.searchParams.set("contextKey", contextKey);
     if (userId) url.searchParams.set("userId", userId);
     if (role) url.searchParams.set("role", role);
@@ -317,6 +378,24 @@ export async function syncInterviewToGunaEmr({ appointment, patient, doctor, ans
   };
 
   return postJson("/api/convert/symptoms", payload);
+}
+
+export async function syncNurseVitalsToGunaEmr({ appointment, patient, vitals, emrSync }) {
+  const bp = extractBloodPressure(vitals?.bloodPressure);
+
+  const payload = {
+    appointmentId: appointment.id,
+    encounterId: pickEncounterId(appointment, emrSync),
+    patientId: pickPatientId(patient, emrSync),
+    systolic: bp.systolic,
+    diastolic: bp.diastolic,
+    heartRate: parseNumber(vitals?.pulse),
+    temperature: parseNumber(vitals?.temperature),
+    spo2: parseNumber(vitals?.spo2),
+    painScore: parseNumber(vitals?.painScore)
+  };
+
+  return postJson("/api/convert/vitals", payload);
 }
 
 export async function syncDoctorApprovalToGunaEmr({ appointment, patient, doctor, draft, note, followUpNote, emrSync }) {

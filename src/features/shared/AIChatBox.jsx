@@ -1,26 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-import { ArrowRight, Bot, CalendarClock, CalendarDays, CheckCircle2, MessageCircle, Mic, Send, Sparkles, User, Volume2, X } from "lucide-react";
+import { ArrowRight, CalendarClock, CalendarDays, CheckCircle2, MessageCircle, Mic, Send, Sparkles, User, Volume2, X } from "lucide-react";
 import { useDemoData } from "../../app/DemoDataProvider";
+import chatbotMarkSrc from "../../assets/nira-chatbot-mark.png";
 import { formatDate, formatTime } from "../../lib/format";
 import { cn } from "../../lib/utils";
 import {
   chatWithContextGunaEmr,
   fetchSymptomChatMemory,
   submitSymptomChatToEmr,
-  generateDynamicPrecheckQuestions,
 } from "../../services/gunaEmrBridge";
 import { getBookableDoctors, getDoctorSchedules, getPatientWorkspace, getScheduleByDate } from "./selectors";
 import { useRealtimeTable } from "../../hooks/useSupabaseRealtime";
 
-const BOOKING_INTENT_REGEX = /\b(book|schedule|appointment|slot|doctor visit|consult)\b/i;
+const BOOKING_INTENT_REGEX = /\b(book|schedule|appointment|slot|doctor visit|consult|availability|available)\b/i;
 const LOGIN_HELP_INTENT_REGEX = /\b(login|log in|signin|sign in|signup|sign up|register|account|password)\b/i;
 const CONTACT_HELP_INTENT_REGEX = /\b(contact|support|helpdesk|helpline|call|email|reach)\b/i;
 const PRECHECK_INTENT_REGEX = /\b(pre[\s-]?check|questionnaire|doctor questions|questions from doctor)\b/i;
 const EMERGENCY_INTENT_REGEX = /\b(chest pain|shortness of breath|can't breathe|unable to breathe|stroke|face droop|slurred speech|severe bleeding|faint|unconscious)\b/i;
 const SYMPTOM_SIGNAL_REGEX = /\b(fever|cough|cold|pain|ache|headache|migraine|vomit|vomiting|nausea|diarrhea|diarrhoea|constipation|bloating|gas|acidity|acid reflux|heartburn|breath|breathless|rash|dizzy|dizziness|fatigue|weakness|stomach|abdomen|abdominal|chest|bp|pressure|sore throat|infection|burning urine|urinary|urine|back pain|joint pain|allergy|itching)\b/i;
 const NON_CLINICAL_CHAT_REGEX = /^\s*(hi|hello|hey|ok|okay|thanks|thank you|help)\s*[.!?]*\s*$/i;
+const ALL_DOCTORS_INTENT_REGEX = /\b(any other doctor|another doctor|different doctor|show all doctors|show me all doctors|other doctor)\b/i;
+const DEFAULT_ADAPTIVE_PRECHECK_TARGET = 8;
+const PRECHECK_AUTOCLOSE_DELAY_MS = 1200;
 
 const BOOKING_STEPS = [
   { key: "symptoms", label: "Symptoms", description: "Tell me what's bothering you." },
@@ -29,22 +32,43 @@ const BOOKING_STEPS = [
   { key: "confirm", label: "Confirm", description: "Review and book." },
 ];
 
-const SYMPTOM_EXAMPLE_PROMPTS = [
-  "Main symptom + duration (e.g., constipation for 2 days)",
-  "Severity + what worsens/relieves it",
-  "Any related symptoms (fever, nausea, dizziness, etc.)",
-];
+const CHATBOT_MARK_DIM = { xs: 14, sm: 18, md: 22, lg: 30, xl: 38 };
+
+function NiraChatbotMark({ size = "md", onDark = false, className }) {
+  const dim = CHATBOT_MARK_DIM[size] ?? CHATBOT_MARK_DIM.md;
+  return (
+    <img
+      src={chatbotMarkSrc}
+      alt=""
+      width={dim}
+      height={dim}
+      className={cn(
+        "nira-chatbot-mark shrink-0 select-none object-contain",
+        onDark && "nira-chatbot-mark--on-dark",
+        className,
+      )}
+      draggable={false}
+      decoding="async"
+    />
+  );
+}
 
 export function AIChatBox() {
   const location = useLocation();
   const navigate = useNavigate();
   const { state, session, actions } = useDemoData();
-  const { patient, pendingPrecheckQuestionnaire, nextAppointment: wsNextAppointment } = getPatientWorkspace(state || {});
+  const {
+    appointments,
+    patient,
+    pendingPrecheckAppointments,
+    nextAppointment: wsNextAppointment,
+  } = getPatientWorkspace(state || {});
   const language = "en";
   const isAuthenticated = !!session?.isAuthenticated;
   const role = session?.role || null;
   const patientMode = isAuthenticated && role === "patient";
   const guestMode = !isAuthenticated;
+  const showClinicianIntakeMeta = ["doctor", "admin", "nurse"].includes(role || "");
   const hiddenByRole = ["doctor", "admin", "nurse"].includes(role || "");
   const hiddenByPath = ["/doctor", "/admin", "/nurse"].some((prefix) => location.pathname.startsWith(prefix));
   const avoidsPatientFloatingBook = location.pathname.startsWith("/patient/appointments");
@@ -53,47 +77,40 @@ export function AIChatBox() {
     () => ({
       role: "ai",
       text: guestMode
-        ? "Hi! I can help with login and contact support. Please tell me whether you need help signing in, creating an account, or contacting us."
-        : "Hi! I'm NIRA AI. First share your symptoms or reason for visit. Then I'll show doctors, available slots, and only book after you confirm.",
+        ? "Hi! I can help with login, signup, or contact support. Tell me what you need and I’ll guide you step by step."
+        : "Hi! I'm the chatbot. Share your main symptom, when it started, and what makes it better or worse. I’ll ask one focused follow-up question at a time and save your answers for your doctor.",
       time: new Date(),
     }),
     [guestMode]
   );
-  const contextKey = `${session?.role || "unknown"}:${session?.userId || "anonymous"}`;
+  const defaultContextKey = `${session?.role || "unknown"}:${session?.userId || "anonymous"}`;
   const bookableDoctors = useMemo(() => getBookableDoctors(state || {}), [state]);
   const [open, setOpen] = useState(false);
   const [messages, setMessages] = useState([initialMessage]);
   const [input, setInput] = useState("");
   const [typing, setTyping] = useState(false);
   const [intakeSubmitted, setIntakeSubmitted] = useState(false);
-  const [chatEntryMode, setChatEntryMode] = useState("booking");
-  const [precheckFlow, setPrecheckFlow] = useState({
-    active: false,
-    phase: null,
-    appointmentId: null,
-    questionnaireId: null,
-    appointmentContext: null,
-    seedAnswers: { reason: "", duration: "" },
-    dynamicQuestions: [],
-    currentDynamicIndex: 0,
-    responses: {},
-    completed: false,
-    submitting: false,
-  });
+  const [precheckFlow, setPrecheckFlow] = useState(createEmptyPrecheckFlow);
   const [isListening, setIsListening] = useState(false);
   const recognitionRef = useRef(null);
-  const [bookingFlow, setBookingFlow] = useState({
-    stage: "symptoms",
-    symptoms: "",
-    doctorId: "",
-    slotDate: "",
-    slotId: "",
-  });
+  const [bookingFlow, setBookingFlow] = useState(createEmptyBookingFlow);
+  const [triageAppointmentId, setTriageAppointmentId] = useState("");
   const inputRef = useRef(null);
   const bottomRef = useRef(null);
+  const inPrecheckSession = patientMode && Boolean(precheckFlow.appointmentId);
+  const appointmentLookup = useMemo(
+    () => new Map(appointments.map((appointment) => [appointment.id, appointment])),
+    [appointments]
+  );
+  const defaultPrecheckAppointment = pendingPrecheckAppointments[0] || wsNextAppointment || null;
+  const precheckContextKey = useMemo(
+    () => buildPrecheckSessionContextKey(defaultContextKey, precheckFlow.appointmentId),
+    [defaultContextKey, precheckFlow.appointmentId]
+  );
+  const activeContextKey = inPrecheckSession ? precheckContextKey : defaultContextKey;
   const { data: realtimeEvents } = useRealtimeTable("chat_events", {
     column: "context_key",
-    value: contextKey,
+    value: activeContextKey,
   });
 
   const rankedDoctors = useMemo(
@@ -101,19 +118,95 @@ export function AIChatBox() {
     [bookableDoctors, bookingFlow.symptoms, input]
   );
   const selectedDoctor = bookableDoctors.find((doctor) => doctor.id === bookingFlow.doctorId) || null;
+  const suggestedDoctorForBooking = rankedDoctors[0] || null;
+  const triageLinkedAppointment = triageAppointmentId
+    ? state?.appointments?.byId?.[triageAppointmentId] || null
+    : null;
   const selectedDoctorSchedules = useMemo(
     () => (selectedDoctor ? getDoctorSchedules(state || {}, selectedDoctor.id, 14) : []),
     [state, selectedDoctor?.id]
   );
-  const selectedDate = bookingFlow.slotDate || selectedDoctorSchedules.find((schedule) => schedule.slotSummary.available > 0)?.date || state?.meta?.today || "";
+  const reservedSlotDate =
+    triageLinkedAppointment && selectedDoctor && triageLinkedAppointment.doctorId === selectedDoctor.id
+      ? String(triageLinkedAppointment.startAt || "").slice(0, 10)
+      : "";
+  const selectedDate = bookingFlow.slotDate || reservedSlotDate || selectedDoctorSchedules.find((schedule) => schedule.slotSummary.available > 0)?.date || state?.meta?.today || "";
   const selectedSchedule = selectedDoctor ? getScheduleByDate(state || {}, selectedDoctor.id, selectedDate) : null;
-  const availableDates = selectedDoctorSchedules.filter((schedule) => schedule.slotSummary.available > 0);
-  const availableSlots = (selectedSchedule?.slots || []).filter((slot) => slot.status === "available");
+  const reservedTriageSlot = useMemo(() => {
+    if (!triageLinkedAppointment || !selectedDoctor || triageLinkedAppointment.doctorId !== selectedDoctor.id) {
+      return null;
+    }
+
+    if (!selectedDate || String(triageLinkedAppointment.startAt || "").slice(0, 10) !== selectedDate) {
+      return null;
+    }
+
+    const existingSlot = selectedSchedule?.slots?.find((slot) => slot.id === triageLinkedAppointment.slotId) || null;
+    if (existingSlot) {
+      return {
+        ...existingSlot,
+        status: existingSlot.status === "available" ? "available" : "reserved",
+      };
+    }
+
+    if (!triageLinkedAppointment.startAt || !triageLinkedAppointment.endAt) {
+      return null;
+    }
+
+    return {
+      id: triageLinkedAppointment.slotId || `reserved-${triageAppointmentId}`,
+      startAt: triageLinkedAppointment.startAt,
+      endAt: triageLinkedAppointment.endAt,
+      status: "reserved",
+    };
+  }, [triageLinkedAppointment, selectedDoctor?.id, selectedDate, selectedSchedule, triageAppointmentId]);
+  const availableDates = useMemo(() => {
+    const visibleDates = selectedDoctorSchedules.filter((schedule) => schedule.slotSummary.available > 0);
+    if (!reservedSlotDate || visibleDates.some((schedule) => schedule.date === reservedSlotDate)) {
+      return visibleDates;
+    }
+
+    const reservedSchedule = selectedDoctorSchedules.find((schedule) => schedule.date === reservedSlotDate) || null;
+    return reservedSchedule ? [reservedSchedule, ...visibleDates] : visibleDates;
+  }, [selectedDoctorSchedules, reservedSlotDate]);
+  const availableSlots = useMemo(() => {
+    const visibleSlots = (selectedSchedule?.slots || []).filter((slot) => slot.status === "available");
+    if (!reservedTriageSlot || visibleSlots.some((slot) => slot.id === reservedTriageSlot.id)) {
+      return visibleSlots;
+    }
+
+    return [{ ...reservedTriageSlot, status: "reserved" }, ...visibleSlots];
+  }, [selectedSchedule, reservedTriageSlot]);
   const bookingStageIndex = BOOKING_STEPS.findIndex((step) => step.key === bookingFlow.stage);
-  const currentBookingStep = bookingStageIndex >= 0 ? BOOKING_STEPS[bookingStageIndex] : BOOKING_STEPS[0];
   const activePrecheckQuestion = precheckFlow.phase === "dynamic"
     ? precheckFlow.dynamicQuestions[precheckFlow.currentDynamicIndex] || null
     : null;
+  const precheckSessionClosedForInput =
+    inPrecheckSession && (precheckFlow.completed || precheckFlow.phase === "unavailable");
+  const quickPrompts = useMemo(() => {
+    if (guestMode) {
+      return [
+        { label: "Login help", value: "I need help logging in." },
+        { label: "Signup help", value: "I want to create an account." },
+        { label: "Contact support", value: "I need contact support details." }
+      ];
+    }
+
+    if (patientMode) {
+      return [
+        { label: "Main concern", value: "My main concern is..." },
+        { label: "When it started", value: "It started about..." },
+        { label: "What changes it", value: "It gets worse when..." }
+      ];
+    }
+
+    return [];
+  }, [guestMode, patientMode]);
+  const patientBrandLabel = "Chatbot";
+  const patientHeaderTitle = inPrecheckSession ? "NIRA Pre-Check" : patientBrandLabel;
+  const patientHeaderDescription = inPrecheckSession
+    ? "Answer a few simple questions so your doctor can review them before the visit."
+    : "Tell me your symptoms or ask for help with booking an appointment.";
 
   useEffect(() => {
     setMessages([initialMessage]);
@@ -121,39 +214,40 @@ export function AIChatBox() {
     setOpen(false);
     setTyping(false);
     setIntakeSubmitted(false);
-    setBookingFlow({
-      stage: "symptoms",
-      symptoms: "",
-      doctorId: "",
-      slotDate: "",
-      slotId: "",
-    });
-    setChatEntryMode("booking");
-    setPrecheckFlow({
-      active: false,
-      phase: null,
-      appointmentId: null,
-      questionnaireId: null,
-      appointmentContext: null,
-      seedAnswers: { reason: "", duration: "" },
-      dynamicQuestions: [],
-      currentDynamicIndex: 0,
-      responses: {},
-      completed: false,
-      submitting: false,
-    });
+    setBookingFlow(createEmptyBookingFlow());
+    setTriageAppointmentId("");
+    setPrecheckFlow(createEmptyPrecheckFlow());
   }, [initialMessage]);
 
+  function resolvePrecheckAppointment(context = {}) {
+    const appointmentId = context.appointmentId || defaultPrecheckAppointment?.id || null;
+    if (!appointmentId) {
+      return null;
+    }
+
+    return appointmentLookup.get(appointmentId) || null;
+  }
+
   function startPrecheckFlow(context = {}) {
-    const doctorName = context.doctorName || wsNextAppointment?.doctor?.fullName || "your doctor";
-    const specialty = context.specialty || wsNextAppointment?.doctor?.specialty || "General Practice";
-    const appointmentId = context.appointmentId || wsNextAppointment?.id || pendingPrecheckQuestionnaire?.appointmentId;
-    const startAt = context.startAt || wsNextAppointment?.startAt;
+    const targetAppointment = resolvePrecheckAppointment(context);
+    const appointmentId = context.appointmentId || targetAppointment?.id || null;
+    const doctorName = context.doctorName || targetAppointment?.doctor?.fullName || "your doctor";
+    const specialty = context.specialty || targetAppointment?.doctor?.specialty || "General Practice";
+    const startAt = context.startAt || targetAppointment?.startAt;
+    const questionnaireId =
+      context.questionnaireId
+      || targetAppointment?.precheckQuestionnaire?.id
+      || getQuestionnaireByAppointmentId(state, appointmentId)?.id
+      || null;
+
+    if (!appointmentId) {
+      return;
+    }
 
     setMessages([]);
-    setChatEntryMode("precheck");
-    setBookingFlow({ stage: "symptoms", symptoms: "", doctorId: "", slotDate: "", slotId: "" });
+    setBookingFlow(createEmptyBookingFlow());
     setIntakeSubmitted(false);
+    setTriageAppointmentId("");
 
     const apptCtx = {
       appointmentId,
@@ -162,20 +256,17 @@ export function AIChatBox() {
       startAt,
       patientId: patient?.id,
       encounterId: appointmentId ? `encounter-${appointmentId}` : null,
+      launchSource: context.launchSource || "patient_chatbot",
     };
 
     setPrecheckFlow({
+      ...createEmptyPrecheckFlow(),
       active: true,
-      phase: "seed_reason",
+      phase: "preparing",
       appointmentId,
-      questionnaireId: pendingPrecheckQuestionnaire?.id || null,
+      questionnaireId,
       appointmentContext: apptCtx,
-      seedAnswers: { reason: "", duration: "" },
-      dynamicQuestions: [],
-      currentDynamicIndex: 0,
-      responses: {},
-      completed: false,
-      submitting: false,
+      sessionContextKey: buildPrecheckSessionContextKey(defaultContextKey, appointmentId),
     });
 
     const timeStr = startAt ? ` on ${formatDate(startAt)} at ${formatTime(startAt)}` : "";
@@ -183,17 +274,115 @@ export function AIChatBox() {
     setMessages([
       {
         role: "ai",
-        text: `Welcome to your Pre-Appointment Check!\n\nThis quick questionnaire helps ${doctorName} (${specialty}) understand your condition before your visit${timeStr}. Your answers are shared securely with your care team.\n\nI'll ask about 6 tailored questions \u2014 let's begin.`,
+        text: `Welcome to your Pre-Appointment Check!\n\nThis quick questionnaire helps ${doctorName} (${specialty}) understand your condition before your visit${timeStr}. Your answers are shared securely with your care team.\n\nI'll ask one question at a time and adjust the next question based on your answers.`,
         time: new Date(),
         meta: "precheck-intro",
-      },
+      }
+    ]);
+    setTyping(true);
+    void preparePrecheckSession(apptCtx, questionnaireId);
+  }
+
+  async function submitCompletedPrecheck(finalResponses, finalRawResponses = precheckFlow.rawResponses || {}) {
+    if (precheckFlow.appointmentId) {
+      await actions.booking.submitPrecheckResponses(precheckFlow.appointmentId, {
+        patientResponses: finalResponses,
+        metadata: {
+          source: "patient_precheck",
+          workflow: "patient_precheck",
+          sessionType: "precheck_chat",
+          chatContextKey: precheckFlow.sessionContextKey || buildPrecheckSessionContextKey(defaultContextKey, precheckFlow.appointmentId),
+          submittedFrom: precheckFlow.appointmentContext?.launchSource || "patient_chatbot",
+          rawPatientResponses: finalRawResponses,
+        },
+      });
+    }
+
+    setPrecheckFlow((curr) => ({
+      ...curr,
+      active: false,
+      responses: finalResponses,
+      rawResponses: finalRawResponses,
+      completed: true,
+      submitting: false,
+      phase: "complete",
+    }));
+    setMessages((prev) => [
+      ...prev,
       {
         role: "ai",
-        text: "Q1/6: What health problem or concern brings you to this visit? Please describe what you're experiencing.",
+        text: `All done! Your pre-check answers have been submitted and shared with ${precheckFlow.appointmentContext?.doctorName || "your doctor"}. They'll review your responses before the appointment.\n\nThank you for preparing \u2014 this helps ensure a smoother consultation.`,
         time: new Date(),
-        meta: "precheck-q1",
+        meta: `precheck-complete-${precheckFlow.questionnaireId}`,
       },
     ]);
+  }
+
+  async function preparePrecheckSession(apptCtx, initialQuestionnaireId = null) {
+    try {
+      let workingSnapshot = state;
+      let questionnaire = getQuestionnaireByAppointmentId(workingSnapshot, apptCtx.appointmentId);
+
+      if (actions?.booking?.ensurePrecheckQuestionnaire) {
+        workingSnapshot = await actions.booking.ensurePrecheckQuestionnaire(apptCtx.appointmentId, {
+          status: "sent_to_patient"
+        });
+        questionnaire = getQuestionnaireByAppointmentId(workingSnapshot, apptCtx.appointmentId) || questionnaire;
+      }
+
+      const useStaticQuestions = Array.isArray(questionnaire?.editedQuestions) && questionnaire.editedQuestions.length > 0;
+
+      if (!useStaticQuestions && actions?.booking?.startAdaptivePrecheckSession) {
+        workingSnapshot = await actions.booking.startAdaptivePrecheckSession(apptCtx.appointmentId);
+        questionnaire = getQuestionnaireByAppointmentId(workingSnapshot, apptCtx.appointmentId) || questionnaire;
+      }
+
+      const activeQuestions = getQuestionnaireQuestions(questionnaire);
+      const answeredCount = countAnsweredPrecheckResponses(questionnaire);
+      const targetQuestionCount = getAdaptiveTargetQuestionCount(questionnaire, activeQuestions.length || DEFAULT_ADAPTIVE_PRECHECK_TARGET);
+      const currentQuestion = activeQuestions[answeredCount] || null;
+
+      if (!currentQuestion) {
+        throw new Error("No AI pre-check questions available.");
+      }
+
+      setPrecheckFlow((curr) => ({
+        ...curr,
+        adaptive: !useStaticQuestions,
+        phase: "dynamic",
+        questionnaireId: questionnaire?.id || initialQuestionnaireId || curr.questionnaireId,
+        dynamicQuestions: activeQuestions,
+        currentDynamicIndex: answeredCount,
+        responses: questionnaire?.patientResponses || {},
+        rawResponses: questionnaire?.metadata?.rawPatientResponses || questionnaire?.patientResponses || {},
+        targetQuestionCount,
+      }));
+      setMessages((prev) => {
+        const introMessages = prev.filter((message) => message.meta === "precheck-intro");
+        return [
+          ...introMessages,
+          ...buildPrecheckConversationMessages(questionnaire, targetQuestionCount)
+        ];
+      });
+    } catch {
+      setPrecheckFlow((curr) => ({
+        ...curr,
+        phase: "unavailable",
+        dynamicQuestions: [],
+        currentDynamicIndex: 0,
+      }));
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: "I couldn't prepare your AI pre-check questions right now. Please try again shortly.",
+          time: new Date(),
+          meta: "precheck-unavailable",
+        },
+      ]);
+    } finally {
+      setTyping(false);
+    }
   }
 
   async function processPrecheckAnswer(answerText, existingUserMessage = null) {
@@ -211,98 +400,7 @@ export function AIChatBox() {
       setMessages((prev) => [...prev, userMessage]);
     }
 
-    const { phase, dynamicQuestions, currentDynamicIndex, seedAnswers, appointmentContext } = precheckFlow;
-
-    if (phase === "seed_reason") {
-      const updatedSeed = { ...seedAnswers, reason: trimmed };
-      setPrecheckFlow((curr) => ({
-        ...curr,
-        phase: "seed_duration",
-        seedAnswers: updatedSeed,
-        responses: { ...curr.responses, "precheck-reason": trimmed },
-      }));
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "ai",
-          text: "Q2/6: How long have you been experiencing this? (e.g., 2 days, 1 week, since last month)",
-          time: new Date(),
-        },
-      ]);
-      return;
-    }
-
-    if (phase === "seed_duration") {
-      const updatedSeed = { ...seedAnswers, duration: trimmed };
-      setPrecheckFlow((curr) => ({
-        ...curr,
-        phase: "generating",
-        seedAnswers: updatedSeed,
-        responses: { ...curr.responses, "precheck-duration": trimmed },
-      }));
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "ai",
-          text: "Thank you. Analyzing your responses to prepare personalized follow-up questions...",
-          time: new Date(),
-          meta: "precheck-generating",
-        },
-      ]);
-      setTyping(true);
-
-      try {
-        const ctx = appointmentContext || {};
-        const raw = await generateDynamicPrecheckQuestions({
-          patientId: ctx.patientId || patient?.id,
-          encounterId: ctx.encounterId,
-          chiefComplaint: updatedSeed.reason,
-          duration: updatedSeed.duration,
-          specialty: ctx.specialty,
-          patientContext: buildPatientContextString(patient),
-        });
-
-        const parsed = normalizeDynamicQuestions(raw, updatedSeed);
-        const finalQuestions = parsed.length > 0 ? parsed.slice(0, 4) : buildFallbackDynamicQuestions(updatedSeed, ctx);
-        const totalQuestions = finalQuestions.length + 2;
-
-        setTyping(false);
-        setPrecheckFlow((curr) => ({
-          ...curr,
-          phase: "dynamic",
-          dynamicQuestions: finalQuestions,
-          currentDynamicIndex: 0,
-        }));
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "ai",
-            text: buildDynamicQuestionPrompt(finalQuestions[0], 3, totalQuestions),
-            time: new Date(),
-          },
-        ]);
-      } catch {
-        setTyping(false);
-        const ctx = appointmentContext || {};
-        const fallback = buildFallbackDynamicQuestions(updatedSeed, ctx);
-        const totalQuestions = fallback.length + 2;
-        setPrecheckFlow((curr) => ({
-          ...curr,
-          phase: "dynamic",
-          dynamicQuestions: fallback,
-          currentDynamicIndex: 0,
-        }));
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "ai",
-            text: buildDynamicQuestionPrompt(fallback[0], 3, totalQuestions),
-            time: new Date(),
-          },
-        ]);
-      }
-      return;
-    }
+    const { phase, dynamicQuestions, currentDynamicIndex } = precheckFlow;
 
     if (phase === "dynamic") {
       const currentQuestion = dynamicQuestions[currentDynamicIndex];
@@ -318,51 +416,85 @@ export function AIChatBox() {
       }
 
       const nextResponses = { ...precheckFlow.responses, [currentQuestion.id]: validation.value };
-      const nextIndex = currentDynamicIndex + 1;
-      const totalQuestions = dynamicQuestions.length + 2;
-
-      if (nextIndex < dynamicQuestions.length) {
-        const nextQuestion = dynamicQuestions[nextIndex];
-        setPrecheckFlow((curr) => ({
-          ...curr,
-          responses: nextResponses,
-          currentDynamicIndex: nextIndex,
-        }));
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "ai",
-            text: buildDynamicQuestionPrompt(nextQuestion, nextIndex + 3, totalQuestions),
-            time: new Date(),
-          },
-        ]);
-        return;
-      }
-
-      setPrecheckFlow((curr) => ({ ...curr, responses: nextResponses, submitting: true, phase: "submitting" }));
+      const nextRawResponses = { ...precheckFlow.rawResponses, [currentQuestion.id]: trimmed };
+      setPrecheckFlow((curr) => ({
+        ...curr,
+        responses: nextResponses,
+        rawResponses: nextRawResponses,
+        submitting: true,
+        phase: "submitting"
+      }));
       setTyping(true);
 
       try {
-        if (precheckFlow.appointmentId) {
-          await actions.booking.submitPrecheckResponses(precheckFlow.appointmentId, nextResponses);
+        if (precheckFlow.adaptive && actions?.booking?.answerAdaptivePrecheckQuestion && precheckFlow.appointmentId) {
+          const nextSnapshot = await actions.booking.answerAdaptivePrecheckQuestion(precheckFlow.appointmentId, {
+            questionId: currentQuestion.id,
+            answer: validation.value,
+            rawAnswer: trimmed
+          });
+          const updatedQuestionnaire = getQuestionnaireByAppointmentId(nextSnapshot, precheckFlow.appointmentId);
+          const updatedQuestions = getQuestionnaireQuestions(updatedQuestionnaire);
+          const updatedResponses = updatedQuestionnaire?.patientResponses || nextResponses;
+          const updatedRawResponses = updatedQuestionnaire?.metadata?.rawPatientResponses || nextRawResponses;
+          const answeredCount = countAnsweredPrecheckResponses(updatedQuestionnaire);
+          const targetQuestionCount = getAdaptiveTargetQuestionCount(
+            updatedQuestionnaire,
+            precheckFlow.targetQuestionCount || updatedQuestions.length || DEFAULT_ADAPTIVE_PRECHECK_TARGET
+          );
+          const nextQuestion = updatedQuestions[answeredCount] || null;
+
+          if (nextQuestion) {
+            setPrecheckFlow((curr) => ({
+              ...curr,
+              adaptive: true,
+              responses: updatedResponses,
+              rawResponses: updatedRawResponses,
+              dynamicQuestions: updatedQuestions,
+              currentDynamicIndex: answeredCount,
+              targetQuestionCount,
+              submitting: false,
+              phase: "dynamic",
+            }));
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "ai",
+                text: buildDynamicQuestionPrompt(nextQuestion, answeredCount + 1, targetQuestionCount),
+                time: new Date(),
+              },
+            ]);
+            return;
+          }
+
+          await submitCompletedPrecheck(updatedResponses, updatedRawResponses);
+          return;
         }
-        setPrecheckFlow((curr) => ({
-          ...curr,
-          active: false,
-          responses: nextResponses,
-          completed: true,
-          submitting: false,
-          phase: "complete",
-        }));
-        setMessages((prev) => [
-          ...prev,
-          {
-            role: "ai",
-            text: `All done! Your pre-check answers have been submitted and shared with ${precheckFlow.appointmentContext?.doctorName || "your doctor"}. They'll review your responses before the appointment.\n\nThank you for preparing \u2014 this helps ensure a smoother consultation.`,
-            time: new Date(),
-            meta: `precheck-complete-${precheckFlow.questionnaireId}`,
-          },
-        ]);
+
+        const nextIndex = currentDynamicIndex + 1;
+        const totalQuestions = precheckFlow.targetQuestionCount || dynamicQuestions.length;
+        if (nextIndex < dynamicQuestions.length) {
+          const nextQuestion = dynamicQuestions[nextIndex];
+          setPrecheckFlow((curr) => ({
+            ...curr,
+            responses: nextResponses,
+            rawResponses: nextRawResponses,
+            currentDynamicIndex: nextIndex,
+            submitting: false,
+            phase: "dynamic",
+          }));
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "ai",
+              text: buildDynamicQuestionPrompt(nextQuestion, nextIndex + 1, totalQuestions),
+              time: new Date(),
+            },
+          ]);
+          return;
+        }
+
+        await submitCompletedPrecheck(nextResponses, nextRawResponses);
       } catch {
         setPrecheckFlow((curr) => ({ ...curr, submitting: false, phase: "dynamic" }));
         setMessages((prev) => [
@@ -394,10 +526,11 @@ export function AIChatBox() {
   useEffect(() => {
     if (!patientMode) return;
     if (!open) return;
+    if (inPrecheckSession) return;
 
     let cancelled = false;
     fetchSymptomChatMemory({
-      contextKey,
+      contextKey: defaultContextKey,
       userId: session?.userId,
       role: session?.role,
       patientPhone: patient?.phone,
@@ -428,10 +561,11 @@ export function AIChatBox() {
     return () => {
       cancelled = true;
     };
-  }, [open, contextKey, session?.userId, session?.role, patient?.phone, language, patientMode]);
+  }, [open, defaultContextKey, session?.userId, session?.role, patient?.phone, language, patientMode, inPrecheckSession]);
 
   useEffect(() => {
     if (!patientMode) return;
+    if (inPrecheckSession) return;
     if (!realtimeEvents?.length) return;
 
     const latest = realtimeEvents[0];
@@ -453,15 +587,12 @@ export function AIChatBox() {
         },
       ];
     });
-  }, [realtimeEvents, patientMode]);
+  }, [realtimeEvents, patientMode, inPrecheckSession]);
 
-  const inPrecheckQuestionnaire = precheckFlow.active && !precheckFlow.completed;
   const showBookingStrip =
     patientMode &&
-    !inPrecheckQuestionnaire &&
-    (chatEntryMode === "booking" ||
-      pendingPrecheckQuestionnaire?.status !== "sent_to_patient" ||
-      precheckFlow.completed);
+    !inPrecheckSession &&
+    bookingFlow.stage !== "symptoms";
 
   useEffect(() => {
     function handleOpenPrecheck(event) {
@@ -472,7 +603,7 @@ export function AIChatBox() {
 
     window.addEventListener("nira:open-precheck", handleOpenPrecheck);
     return () => window.removeEventListener("nira:open-precheck", handleOpenPrecheck);
-  }, [pendingPrecheckQuestionnaire, wsNextAppointment, patient]);
+  }, [pendingPrecheckAppointments, wsNextAppointment, patient]);
 
   function speak(text) {
     if (!window?.speechSynthesis || !text) return;
@@ -484,6 +615,10 @@ export function AIChatBox() {
   }
 
   function toggleListening() {
+    if (precheckSessionClosedForInput) {
+      return;
+    }
+
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) return;
 
@@ -513,9 +648,107 @@ export function AIChatBox() {
     setIsListening(true);
   }
 
+  async function handleBookingStageInput(text) {
+    const lower = text.toLowerCase();
+
+    if (bookingFlow.stage === "doctor") {
+      const matchedDoctor = findDoctorFromText(rankedDoctors, text) || findDoctorFromText(bookableDoctors, text);
+      if (matchedDoctor) {
+        chooseDoctor(matchedDoctor);
+        return true;
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: ALL_DOCTORS_INTENT_REGEX.test(lower)
+            ? "All available doctors are listed below. Pick the doctor you want, and I'll show the available appointment slots next."
+            : "Choose a doctor from the list below. If you want a different doctor, all available doctors are already shown there.",
+          time: new Date(),
+        },
+      ]);
+      return true;
+    }
+
+    if (bookingFlow.stage === "slot") {
+      if (/\b(change|different|another)\b.*\bdoctor\b/i.test(lower)) {
+        restartGuidedBooking();
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "No problem. I've taken you back to the doctor list so you can choose someone else.",
+            time: new Date(),
+          },
+        ]);
+        return true;
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: `Choose one of the available slots above for ${selectedDoctor?.fullName || "your selected doctor"}, and I'll confirm the booking next.`,
+          time: new Date(),
+        },
+      ]);
+      return true;
+    }
+
+    if (bookingFlow.stage === "confirm") {
+      if (/\b(confirm|book|yes|go ahead|continue)\b/i.test(lower)) {
+        await confirmBooking();
+        return true;
+      }
+
+      if (/\b(slot|time|date)\b/i.test(lower)) {
+        setBookingFlow((current) => ({
+          ...current,
+          stage: "slot",
+          slotId: "",
+        }));
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "Sure. Pick a different slot above and I'll update the booking summary.",
+            time: new Date(),
+          },
+        ]);
+        return true;
+      }
+
+      if (/\bdoctor\b/i.test(lower)) {
+        restartGuidedBooking();
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "ai",
+            text: "Sure. I've reopened the doctor list so you can choose a different doctor.",
+            time: new Date(),
+          },
+        ]);
+        return true;
+      }
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: "ai",
+          text: "Review the booking summary below, then tap Book appointment when you're ready.",
+          time: new Date(),
+        },
+      ]);
+      return true;
+    }
+
+    return false;
+  }
+
   async function handleSend() {
     const text = input.trim();
-    if (!text || typing) return;
+    if (!text || typing || precheckSessionClosedForInput) return;
 
     const userMessage = { role: "user", text, time: new Date() };
     const nextMessages = [...messages, userMessage];
@@ -531,15 +764,22 @@ export function AIChatBox() {
       patientMode &&
       PRECHECK_INTENT_REGEX.test(text) &&
       !precheckFlow.active &&
-      wsNextAppointment
+      defaultPrecheckAppointment
     ) {
       startPrecheckFlow({
-        appointmentId: wsNextAppointment.id,
-        doctorName: wsNextAppointment.doctor?.fullName,
-        specialty: wsNextAppointment.doctor?.specialty,
-        startAt: wsNextAppointment.startAt,
+        appointmentId: defaultPrecheckAppointment.id,
+        doctorName: defaultPrecheckAppointment.doctor?.fullName,
+        specialty: defaultPrecheckAppointment.doctor?.specialty,
+        startAt: defaultPrecheckAppointment.startAt,
       });
       return;
+    }
+
+    if (patientMode && !inPrecheckSession && bookingFlow.stage !== "symptoms") {
+      const handled = await handleBookingStageInput(text);
+      if (handled) {
+        return;
+      }
     }
 
     if (guestMode) {
@@ -567,7 +807,7 @@ export function AIChatBox() {
         userId: session?.userId,
         role: session?.role,
         language,
-        contextKey,
+        contextKey: defaultContextKey,
       });
 
       const guidedUpdate = patientMode
@@ -578,12 +818,16 @@ export function AIChatBox() {
           })
         : {};
 
-      if (guidedUpdate.flow && patientMode) {
+      const allowGuidedBookingInSymptoms =
+        bookingFlow.stage === "symptoms" &&
+        (response.readyForSubmission || response.appointmentBookingOffered);
+
+      if (guidedUpdate.flow && patientMode && (bookingFlow.stage !== "symptoms" || allowGuidedBookingInSymptoms)) {
         setBookingFlow(guidedUpdate.flow);
       }
 
       let replyText = response.reply || "I can help summarize this for the doctor and guide the next step.";
-      if (guidedUpdate.replyText) {
+      if (guidedUpdate.replyText && (bookingFlow.stage !== "symptoms" || allowGuidedBookingInSymptoms)) {
         replyText = guidedUpdate.replyText;
       }
 
@@ -591,24 +835,36 @@ export function AIChatBox() {
         replyText = `${replyText}\n\nPlease do not wait for an online booking if you feel unsafe right now.`;
       }
 
-      setMessages((prev) => [
-        ...prev,
+      const aiMessage = {
+        role: "ai",
+        text: replyText,
+        time: new Date(),
+        summary: response.summary,
+        detectedFocus: response.detectedFocus,
+        triageLevel: response.triageLevel,
+        escalationBand: response.escalationBand,
+        ddiWarnings: response.ddiWarnings,
+        adherenceTips: response.adherenceTips,
+        fallbackChannels: response.fallbackChannels,
+      };
+      const conversationMessages = [
+        ...nextMessages,
         {
           role: "ai",
           text: replyText,
-          time: new Date(),
-          summary: response.summary,
-          triageLevel: response.triageLevel,
-          escalationBand: response.escalationBand,
-          ddiWarnings: response.ddiWarnings,
-          adherenceTips: response.adherenceTips,
-          fallbackChannels: response.fallbackChannels,
+          time: aiMessage.time,
         },
+      ];
+
+      setMessages((prev) => [
+        ...prev,
+        aiMessage,
       ]);
 
       if (patientMode && response.readyForSubmission && !intakeSubmitted) {
+        let syncSnapshot = null;
         const submission = await submitSymptomChatToEmr({
-          messages: nextMessages.map((message) => ({
+          messages: conversationMessages.map((message) => ({
             role: message.role === "ai" ? "assistant" : "user",
             content: message.text,
           })),
@@ -617,16 +873,16 @@ export function AIChatBox() {
           userId: session?.userId,
           role: session?.role,
           language,
-          contextKey,
+          contextKey: defaultContextKey,
         });
 
         if (submission?.success) {
           try {
-            await actions.booking.syncChatbotSubmission({
+            syncSnapshot = await actions.booking.syncChatbotSubmission({
               patientId: patient?.id,
               userId: session?.userId,
               language,
-              messages: nextMessages.map((message) => ({
+              messages: conversationMessages.map((message) => ({
                 role: message.role === "ai" ? "assistant" : "user",
                 content: message.text,
               })),
@@ -636,12 +892,22 @@ export function AIChatBox() {
             console.warn("[NIRA] Chatbot submission synced to EMR but local doctor workspace sync failed.", syncError);
           }
 
+          const bookingSymptoms = response.summary || bookingFlow.symptoms || text;
+          const recommendedDoctor = rankDoctorsForSymptoms(bookableDoctors, bookingSymptoms)[0] || null;
           setIntakeSubmitted(true);
+          setTriageAppointmentId(syncSnapshot?.ui?.lastViewedAppointmentId || "");
+          setBookingFlow({
+            stage: bookableDoctors.length ? "doctor" : "symptoms",
+            symptoms: bookingSymptoms,
+            doctorId: "",
+            slotDate: "",
+            slotId: "",
+          });
           setMessages((prev) => [
             ...prev,
             {
               role: "ai",
-              text: `Your triage has been converted to EMR draft and added to queue in realtime. Queue token: ${submission.queueToken || "--"}.`,
+              text: buildPostTriageBookingReply(recommendedDoctor),
               time: new Date(),
               summary: submission.chat?.summary,
               triageLevel: submission.chat?.triageLevel,
@@ -683,33 +949,88 @@ export function AIChatBox() {
   }
 
   function resetBookingFlow() {
-    setBookingFlow({
-      stage: "symptoms",
-      symptoms: "",
+    setBookingFlow(createEmptyBookingFlow());
+    setIntakeSubmitted(false);
+    setTriageAppointmentId("");
+  }
+
+  function restartGuidedBooking() {
+    setBookingFlow((current) => ({
+      stage: intakeSubmitted || triageAppointmentId ? "doctor" : "symptoms",
+      symptoms: current.symptoms,
       doctorId: "",
       slotDate: "",
       slotId: "",
-    });
-    setIntakeSubmitted(false);
+    }));
+  }
+
+  function resetCompletedPrecheckSession() {
+    setMessages([initialMessage]);
+    setInput("");
+    setTyping(false);
+    resetBookingFlow();
+    setPrecheckFlow(createEmptyPrecheckFlow());
+  }
+
+  function closeChatPanel() {
+    if (precheckFlow.completed || precheckFlow.phase === "unavailable") {
+      resetCompletedPrecheckSession();
+    }
+    setOpen(false);
+  }
+
+  useEffect(() => {
+    if (!open || !precheckFlow.completed) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      setMessages([initialMessage]);
+      setInput("");
+      setTyping(false);
+      setIntakeSubmitted(false);
+      setBookingFlow(createEmptyBookingFlow());
+      setTriageAppointmentId("");
+      setPrecheckFlow(createEmptyPrecheckFlow());
+      setOpen(false);
+    }, PRECHECK_AUTOCLOSE_DELAY_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [open, precheckFlow.completed, initialMessage]);
+
+  function toggleChatPanel() {
+    if (open) {
+      closeChatPanel();
+      return;
+    }
+    setOpen(true);
   }
 
   function chooseDoctor(doctor) {
     const nextSchedule = getDoctorSchedules(state || {}, doctor.id, 14).find((schedule) => schedule.slotSummary.available > 0) || doctor.nextSchedule || null;
     const nextSlot = nextSchedule?.slots.find((slot) => slot.status === "available") || null;
+    const reservedDateForDoctor =
+      triageLinkedAppointment && triageLinkedAppointment.doctorId === doctor.id
+        ? String(triageLinkedAppointment.startAt || "").slice(0, 10)
+        : "";
+    const reservedSlotIdForDoctor =
+      triageLinkedAppointment && triageLinkedAppointment.doctorId === doctor.id
+        ? triageLinkedAppointment.slotId || ""
+        : "";
 
     setBookingFlow({
       stage: "slot",
       symptoms: bookingFlow.symptoms,
       doctorId: doctor.id,
-      slotDate: nextSchedule?.date || state?.meta?.today || "",
-      slotId: nextSlot?.id || "",
+      slotDate: reservedDateForDoctor || nextSchedule?.date || state?.meta?.today || "",
+      slotId: reservedSlotIdForDoctor || nextSlot?.id || "",
     });
 
     setMessages((prev) => [
       ...prev,
       {
         role: "ai",
-        text: `Great choice. I'm showing the live slots for ${doctor.fullName} next.`,
+        text: `Great choice. I'm showing the available appointment slots for ${doctor.fullName} next.`,
         time: new Date(),
       },
     ]);
@@ -746,7 +1067,8 @@ export function AIChatBox() {
       return;
     }
 
-    const slot = selectedSchedule.slots.find((entry) => entry.id === bookingFlow.slotId);
+    const slot = selectedSchedule.slots.find((entry) => entry.id === bookingFlow.slotId)
+      || (reservedTriageSlot?.id === bookingFlow.slotId ? reservedTriageSlot : null);
     if (!slot) {
       return;
     }
@@ -754,17 +1076,31 @@ export function AIChatBox() {
     setTyping(true);
 
     try {
-      const snapshot = await actions.booking.bookAppointment({
-        patientId: patient.id,
-        doctorId: selectedDoctor.id,
-        slotId: slot.id,
-        date: selectedSchedule.date,
-        bookedByUserId: session.userId,
-        visitType: "booked",
-        language: "en",
-      });
+      let snapshot;
+      let appointmentId = triageAppointmentId;
 
-      const appointmentId = snapshot.ui.lastViewedAppointmentId;
+      if (triageAppointmentId && actions?.booking?.rescheduleAppointment) {
+        snapshot = await actions.booking.rescheduleAppointment(triageAppointmentId, {
+          doctorId: selectedDoctor.id,
+          slotId: slot.id,
+          date: selectedSchedule.date,
+          visitType: "booked",
+          finalizeChatbotBooking: true,
+        });
+      } else {
+        snapshot = await actions.booking.bookAppointment({
+          patientId: patient.id,
+          doctorId: selectedDoctor.id,
+          slotId: slot.id,
+          date: selectedSchedule.date,
+          bookedByUserId: session.userId,
+          visitType: "booked",
+          language: "en",
+        });
+
+        appointmentId = snapshot.ui.lastViewedAppointmentId;
+      }
+
       const appointment = snapshot.appointments.byId[appointmentId];
       const doctor = snapshot.doctors.byId[appointment.doctorId];
 
@@ -794,34 +1130,48 @@ export function AIChatBox() {
   return (
     <>
       <motion.button
-        onClick={() => {
-          setOpen((value) => {
-            const next = !value;
-            setChatEntryMode("booking");
-            return next;
-          });
-        }}
+        onClick={toggleChatPanel}
         aria-label={open ? "Close AI chat" : "Open AI chat"}
         title={open ? "Close AI chat" : "Open AI chat"}
         className={cn(
-          "fixed z-50 flex h-14 w-14 items-center justify-center rounded-full transition-all",
+          "fixed z-50 transition-all",
           avoidsPatientFloatingBook ? "bottom-24 right-4 sm:right-5" : "bottom-6 right-6",
-          open
-            ? "bg-gradient-to-br from-red-500 to-rose-600 shadow-lg shadow-red-500/25 hover:shadow-xl"
-            : "bg-gradient-to-br from-brand-tide to-brand-sky shadow-lg shadow-brand-sky/30 hover:shadow-xl hover:shadow-brand-sky/40"
+          patientMode
+            ? "flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-brand-sky/15 bg-white/95 text-brand-midnight shadow-[0_22px_46px_-26px_rgba(41,53,93,0.32)] backdrop-blur-xl"
+            : "flex h-14 w-14 items-center justify-center rounded-full",
+          patientMode
+            ? open
+              ? "ring-1 ring-brand-sky/20 shadow-[0_24px_50px_-26px_rgba(41,53,93,0.34)]"
+              : "hover:-translate-y-0.5 hover:border-brand-sky/25 hover:shadow-[0_26px_52px_-26px_rgba(41,53,93,0.36)]"
+            : open
+              ? "bg-gradient-to-br from-red-500 to-rose-600 shadow-lg shadow-red-500/25 hover:shadow-xl"
+              : "bg-gradient-to-br from-brand-tide to-brand-sky shadow-lg shadow-brand-sky/30 hover:shadow-xl hover:shadow-brand-sky/40"
         )}
         whileHover={{ scale: 1.08 }}
         whileTap={{ scale: 0.92 }}
       >
-        {!open && (
+        {!open && !patientMode && (
           <motion.span
             className="absolute inset-0 rounded-full bg-brand-sky/30"
             animate={{ scale: [1, 1.6, 1.6], opacity: [0.5, 0, 0] }}
             transition={{ duration: 2.5, repeat: Infinity, ease: "easeOut" }}
           />
         )}
-        <span className="relative">
-          {open ? <X className="h-6 w-6 text-white" /> : <MessageCircle className="h-6 w-6 text-white" />}
+        <span
+          className={cn(
+            "relative",
+            patientMode
+              ? "flex items-center justify-center"
+              : ""
+          )}
+        >
+          {open ? (
+            <X className={cn("h-5 w-5", patientMode ? "text-brand-midnight" : "text-white")} />
+          ) : patientMode ? (
+            <NiraChatbotMark size="xl" className="h-10 w-10" />
+          ) : (
+            <MessageCircle className="h-5 w-5 text-white" />
+          )}
         </span>
       </motion.button>
 
@@ -833,61 +1183,112 @@ export function AIChatBox() {
             exit={{ opacity: 0, y: 20, scale: 0.95 }}
             transition={{ duration: 0.25 }}
             className={cn(
-              "fixed z-50 flex h-[min(82vh,640px)] w-[min(calc(100vw-1rem),420px)] flex-col overflow-hidden rounded-3xl border border-white/50 bg-white/95 shadow-[0_25px_60px_rgba(11,21,44,0.18),0_0_0_1px_rgba(255,255,255,0.5)] backdrop-blur-2xl",
+              "fixed z-50 flex flex-col overflow-hidden",
+              patientMode
+                ? "nira-chat-shell-patient h-[min(88vh,780px)] w-[min(calc(100vw-0.75rem),500px)]"
+                : "h-[min(84vh,700px)] w-[min(calc(100vw-1rem),460px)] rounded-[2rem] border border-white/60 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,252,255,0.98))] shadow-[0_28px_80px_rgba(11,21,44,0.22),0_0_0_1px_rgba(255,255,255,0.65)] backdrop-blur-2xl",
               avoidsPatientFloatingBook
                 ? "bottom-40 right-2 sm:right-5"
                 : "bottom-20 right-2 sm:bottom-24 sm:right-6"
             )}
           >
-            <div className="relative flex items-center gap-3 bg-gradient-to-r from-brand-midnight via-brand-tide to-brand-sky px-5 py-4 shadow-sm">
+            {patientMode ? (
+              <div className="relative px-3 pb-3 pt-3 sm:px-4">
+                <div className="relative nira-chat-soft-panel p-4">
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-brand-sky/25 bg-[linear-gradient(145deg,rgba(255,255,255,0.95),rgba(224,247,248,0.98))] p-1 shadow-[0_8px_22px_-12px_rgba(0,138,142,0.45)] ring-1 ring-brand-sky/10">
+                      <NiraChatbotMark size="xl" className="h-[2.125rem] w-[2.125rem]" />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="mt-2 text-lg font-semibold tracking-tight text-brand-midnight">{patientHeaderTitle}</div>
+                      <p className="mt-1 text-sm leading-6 text-slate-600">{patientHeaderDescription}</p>
+                      {inPrecheckSession && precheckFlow.appointmentContext?.doctorName ? (
+                        <div className="mt-2 text-xs font-medium text-slate-500">
+                          For {precheckFlow.appointmentContext.doctorName}
+                          {precheckFlow.appointmentContext.startAt ? ` on ${formatDate(precheckFlow.appointmentContext.startAt)} at ${formatTime(precheckFlow.appointmentContext.startAt)}` : ""}
+                        </div>
+                      ) : null}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={closeChatPanel}
+                      className="relative flex h-9 w-9 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition hover:bg-slate-50 hover:text-brand-midnight"
+                      aria-label="Close chat"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="relative flex items-center gap-3 bg-gradient-to-r from-brand-midnight via-brand-tide to-brand-sky px-5 py-4 shadow-sm">
               <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_50%,rgba(255,255,255,0.08),transparent_70%)]" />
-              <div className="relative flex h-10 w-10 items-center justify-center rounded-2xl bg-white/15 ring-1 ring-white/25 backdrop-blur-sm">
-                <Sparkles className="h-5 w-5 text-white" />
+              <div className="relative flex h-10 w-10 items-center justify-center overflow-hidden rounded-2xl border border-white/25 bg-white/20 p-1 shadow-[0_6px_20px_-8px_rgba(0,0,0,0.35)] ring-1 ring-white/35 backdrop-blur-sm">
+                <NiraChatbotMark size="lg" onDark className="h-8 w-8" />
               </div>
               <div className="relative flex-1 min-w-0">
-                <div className="text-sm font-bold tracking-wide text-white">{inPrecheckQuestionnaire ? "NIRA Pre-Check" : "NIRA AI"}</div>
+                <div className="text-sm font-bold tracking-wide text-white">{patientHeaderTitle}</div>
                 <div className="flex items-center gap-1.5 text-xs text-white/70">
                   <span className="relative flex h-1.5 w-1.5">
                     <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
                     <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-400" />
                   </span>
-                  {inPrecheckQuestionnaire ? "Pre-appointment questionnaire" : guestMode ? "Support assistant" : "Clinical assistant \u00B7 Online"}
+                  {inPrecheckSession ? "Pre-appointment chatbot" : guestMode ? "Support chatbot" : "Clinical chatbot \u00B7 Online"}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-2 text-[10px] font-semibold tracking-wide text-white/85">
+                  <span className="rounded-full bg-white/10 px-2.5 py-1 ring-1 ring-white/15">
+                    {guestMode ? "Support mode" : inPrecheckSession ? "Dedicated pre-check" : "AI intake"}
+                  </span>
+                  <span className="rounded-full bg-white/10 px-2.5 py-1 ring-1 ring-white/15">
+                    {patientMode ? "Saved to EMR" : "Login • Signup • Contact"}
+                  </span>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => {
-                  setChatEntryMode("booking");
-                  setOpen(false);
-                }}
+                onClick={closeChatPanel}
                 className="relative flex h-8 w-8 items-center justify-center rounded-xl bg-white/10 text-white/80 transition hover:bg-white/20 hover:text-white"
                 aria-label="Close chat"
               >
                 <X className="h-4 w-4" />
               </button>
-            </div>
+              </div>
+            )}
 
-            {inPrecheckQuestionnaire ? (
-              <div className="border-b border-brand-sky/20 bg-gradient-to-r from-brand-sky/5 to-brand-mint/5 px-4 py-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-2">
-                    <Sparkles className="h-4 w-4 text-brand-tide" />
-                    <span className="text-sm font-semibold text-brand-midnight">Pre-Check Questionnaire</span>
+            {inPrecheckSession ? (
+              <div className={cn("px-3 pb-3 sm:px-4", patientMode ? "" : "border-b border-brand-sky/20 bg-gradient-to-r from-brand-sky/5 to-brand-mint/5 px-4 py-3")}>
+                <div className={cn(patientMode ? "nira-chat-soft-panel px-4 py-3" : "")}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Sparkles className={cn("h-4 w-4", patientMode ? "text-brand-tide" : "text-brand-tide")} />
+                      <span className={cn("text-sm font-semibold", patientMode ? "text-brand-midnight" : "text-brand-midnight")}>Pre-Check Questionnaire</span>
+                    </div>
+                    <span className={cn("text-xs font-medium", patientMode ? "text-muted" : "text-muted")}>
+                      {getPrecheckProgressLabel(precheckFlow)}
+                    </span>
                   </div>
-                  <span className="text-xs font-medium text-muted">
-                    {getPrecheckProgressLabel(precheckFlow)}
-                  </span>
-                </div>
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-100">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-brand-tide to-brand-sky transition-all duration-500"
-                    style={{ width: `${getPrecheckProgressPercent(precheckFlow)}%` }}
-                  />
+                  <div className={cn("mt-3 h-1.5 overflow-hidden rounded-full", patientMode ? "bg-slate-100" : "bg-slate-100")}>
+                    <div
+                      className={cn(
+                        "h-full rounded-full transition-all duration-500",
+                        patientMode
+                          ? "bg-gradient-to-r from-brand-tide to-brand-sky"
+                          : "bg-gradient-to-r from-brand-tide to-brand-sky"
+                      )}
+                      style={{ width: `${getPrecheckProgressPercent(precheckFlow)}%` }}
+                    />
+                  </div>
                 </div>
               </div>
             ) : showBookingStrip ? (
-              <div className="border-b border-slate-100 bg-white/90 px-4 py-3">
-                <div className="flex items-center gap-1.5">
+              <div className={cn("px-3 pb-3 sm:px-4", patientMode ? "" : "border-b border-slate-100 bg-white/90 px-4 py-3")}>
+                <div className={cn(patientMode ? "nira-chat-soft-panel px-4 py-3" : "")}>
+                  {patientMode ? (
+                    <div className="mb-3 text-sm font-medium text-slate-600">
+                      Step {Math.max(bookingStageIndex + 1, 1)} of {BOOKING_STEPS.length}: {BOOKING_STEPS[Math.max(bookingStageIndex, 0)]?.label || BOOKING_STEPS[0].label}
+                    </div>
+                  ) : null}
+                  <div className="flex items-center gap-1.5">
                   {BOOKING_STEPS.map((step, index) => {
                     const active = index === bookingStageIndex || (bookingStageIndex === -1 && index === 0);
                     const done = bookingStageIndex > index;
@@ -899,33 +1300,84 @@ export function AIChatBox() {
                             className={cn(
                               "flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-bold transition-all",
                               active
-                                ? "bg-gradient-to-br from-brand-tide to-brand-sky text-white shadow-sm shadow-brand-sky/25"
+                                ? patientMode
+                                  ? "bg-brand-tide text-white shadow-sm shadow-brand-sky/20"
+                                  : "bg-gradient-to-br from-brand-tide to-brand-sky text-white shadow-sm shadow-brand-sky/25"
                                 : done
-                                  ? "bg-emerald-500 text-white"
-                                  : "bg-slate-100 text-slate-400"
+                                  ? patientMode ? "bg-emerald-500 text-white" : "bg-emerald-500 text-white"
+                                  : patientMode ? "bg-slate-100 text-slate-400" : "bg-slate-100 text-slate-400"
                             )}
                           >
                             {done ? <CheckCircle2 className="h-3.5 w-3.5" /> : index + 1}
                           </div>
-                          <div className={cn("text-[10px] font-semibold text-center leading-tight", active ? "text-brand-tide" : done ? "text-emerald-600" : "text-slate-400")}>
+                          <div className={cn("text-[10px] font-semibold text-center leading-tight", active ? (patientMode ? "text-brand-tide" : "text-brand-tide") : done ? (patientMode ? "text-emerald-600" : "text-emerald-600") : patientMode ? "text-slate-400" : "text-slate-400")}>
                             {step.label}
                           </div>
                         </div>
                         {index < BOOKING_STEPS.length - 1 && (
-                          <div className={cn("h-px w-full flex-1 min-w-2", done ? "bg-emerald-300" : "bg-slate-200")} />
+                          <div className={cn("h-px w-full flex-1 min-w-2", done ? (patientMode ? "bg-emerald-300" : "bg-emerald-300") : patientMode ? "bg-slate-200" : "bg-slate-200")} />
                         )}
                       </div>
                     );
                   })}
                 </div>
               </div>
+              </div>
             ) : null}
 
-            <div className="flex-1 space-y-3 overflow-y-auto bg-gradient-to-b from-slate-50/50 to-white p-3 sm:p-4" role="log" aria-live="polite" aria-label="AI chat messages">
+            <div
+              className={cn(
+                "flex-1 space-y-3 overflow-y-auto",
+                patientMode
+                  ? "nira-chat-scroll-patient px-3 pb-3 pt-1 sm:px-4"
+                  : "bg-gradient-to-b from-slate-50/50 to-white p-3 sm:p-4"
+              )}
+              role="log"
+              aria-live="polite"
+              aria-label="AI chat messages"
+            >
+
+            {patientMode && !inPrecheckSession && bookingFlow.stage === "symptoms" ? (
+                <div className={cn(patientMode ? "nira-chat-hero-card" : "rounded-[1.5rem] border border-brand-sky/15 bg-[linear-gradient(135deg,rgba(224,247,248,0.9),rgba(255,255,255,0.96))] p-4 shadow-sm ring-1 ring-black/[0.03]")}>
+                  <div className="flex items-start gap-3">
+                    <div className={cn(
+                      "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl",
+                      patientMode
+                        ? "border border-brand-sky/10 bg-brand-mint text-brand-tide"
+                        : "bg-white shadow-sm ring-1 ring-brand-sky/15"
+                    )}>
+                      <Sparkles className={cn("h-5 w-5", patientMode ? "text-brand-tide" : "text-brand-tide")} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className={cn("text-sm font-semibold", patientMode ? "text-brand-midnight" : "text-brand-midnight")}>Quick start</div>
+                      <p className={cn("mt-1 text-xs leading-5", patientMode ? "text-muted" : "text-muted")}>
+                        Pick one to begin, or type your symptoms in your own words.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {quickPrompts.map((prompt) => (
+                      <button
+                        key={prompt.label}
+                        type="button"
+                        onClick={() => setInput(prompt.value)}
+                        className={cn(
+                          "text-xs font-semibold transition-all",
+                          patientMode
+                            ? "rounded-full border border-brand-sky/15 bg-white px-3 py-2 text-brand-midnight shadow-sm hover:-translate-y-0.5 hover:border-brand-sky/30 hover:bg-brand-mint/40"
+                            : "rounded-full border border-brand-tide/10 bg-white px-3 py-1.5 text-ink shadow-sm hover:-translate-y-0.5 hover:border-brand-sky hover:bg-brand-mint/40 hover:shadow-md"
+                        )}
+                      >
+                        {prompt.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
 
               {patientMode && precheckFlow.active && precheckFlow.phase === "dynamic" && activePrecheckQuestion?.options?.length ? (
-                <div className="rounded-2xl border border-brand-tide/10 bg-white p-3 shadow-sm ring-1 ring-black/[0.03]">
-                  <div className="text-xs font-semibold text-brand-tide">Quick answers</div>
+                <div className={cn(patientMode ? "nira-chat-soft-panel p-3" : "rounded-2xl border border-brand-tide/10 bg-white p-3 shadow-sm ring-1 ring-black/[0.03]")}>
+                  <div className={cn("text-xs font-semibold", patientMode ? "text-brand-tide" : "text-brand-tide")}>Quick answers</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {activePrecheckQuestion.options.map((option) => (
                       <button
@@ -933,7 +1385,12 @@ export function AIChatBox() {
                         type="button"
                         disabled={precheckFlow.submitting}
                         onClick={() => processPrecheckAnswer(option)}
-                        className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-ink shadow-sm transition-all hover:border-brand-sky hover:bg-brand-mint/30 hover:shadow-md hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                        className={cn(
+                          "rounded-full px-3 py-1.5 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-60",
+                          patientMode
+                            ? "border border-brand-sky/15 bg-white text-brand-midnight hover:-translate-y-0.5 hover:border-brand-sky/30 hover:bg-brand-mint/30"
+                            : "border border-slate-200 bg-white text-ink shadow-sm hover:border-brand-sky hover:bg-brand-mint/30 hover:shadow-md hover:-translate-y-0.5"
+                        )}
                       >
                         {option}
                       </button>
@@ -943,8 +1400,8 @@ export function AIChatBox() {
               ) : null}
 
               {patientMode && precheckFlow.active && precheckFlow.phase === "dynamic" && activePrecheckQuestion?.type === "yesno" ? (
-                <div className="rounded-2xl border border-brand-tide/10 bg-white p-3 shadow-sm ring-1 ring-black/[0.03]">
-                  <div className="text-xs font-semibold text-brand-tide">Quick answers</div>
+                <div className={cn(patientMode ? "nira-chat-soft-panel p-3" : "rounded-2xl border border-brand-tide/10 bg-white p-3 shadow-sm ring-1 ring-black/[0.03]")}>
+                  <div className={cn("text-xs font-semibold", patientMode ? "text-brand-tide" : "text-brand-tide")}>Quick answers</div>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {["Yes", "No"].map((option) => (
                       <button
@@ -952,7 +1409,12 @@ export function AIChatBox() {
                         type="button"
                         disabled={precheckFlow.submitting}
                         onClick={() => processPrecheckAnswer(option.toLowerCase())}
-                        className="rounded-full border border-slate-200 bg-white px-4 py-1.5 text-xs font-medium text-ink shadow-sm transition-all hover:border-brand-sky hover:bg-brand-mint/30 hover:shadow-md hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                        className={cn(
+                          "rounded-full px-4 py-1.5 text-xs font-medium transition-all disabled:cursor-not-allowed disabled:opacity-60",
+                          patientMode
+                            ? "border border-brand-sky/15 bg-white text-brand-midnight hover:-translate-y-0.5 hover:border-brand-sky/30 hover:bg-brand-mint/30"
+                            : "border border-slate-200 bg-white text-ink shadow-sm hover:border-brand-sky hover:bg-brand-mint/30 hover:shadow-md hover:-translate-y-0.5"
+                        )}
                       >
                         {option}
                       </button>
@@ -966,20 +1428,32 @@ export function AIChatBox() {
                   key={`${message.role}-${index}-${message.time?.toString?.() || index}`}
                   initial={{ opacity: 0, y: 8 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={cn("flex gap-2", message.role === "user" ? "justify-end" : "justify-start")}
+                  className={cn("flex gap-3", message.role === "user" ? "justify-end" : "justify-start")}
                 >
                   {message.role === "ai" && (
-                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-brand-tide to-brand-sky shadow-sm">
-                      <Bot className="h-3.5 w-3.5 text-white" />
+                    <div className={cn(
+                      "flex flex-shrink-0 items-center justify-center",
+                      patientMode
+                        ? "mt-1 h-9 w-9 rounded-[1rem] border border-brand-sky/20 bg-gradient-to-br from-brand-mint via-white to-brand-mint/70 p-1 shadow-sm ring-1 ring-white/90"
+                        : "h-7 w-7 rounded-full border border-brand-sky/30 bg-white p-0.5 shadow-md shadow-brand-tide/20 ring-1 ring-white"
+                    )}>
+                      <NiraChatbotMark
+                        size={patientMode ? "md" : "sm"}
+                        className={patientMode ? "h-7 w-7" : "h-6 w-6"}
+                      />
                     </div>
                   )}
-                  <div className="max-w-[80%]">
+                  <div className="max-w-[86%]">
                     <div
                       className={cn(
                         "rounded-2xl px-3.5 py-2.5 text-sm leading-relaxed sm:px-4",
                         message.role === "user"
-                          ? "rounded-br-md bg-gradient-to-r from-brand-midnight to-brand-tide/90 text-white shadow-sm"
-                          : "rounded-bl-md bg-white text-ink shadow-sm ring-1 ring-black/[0.04]"
+                          ? patientMode
+                            ? "nira-chat-bubble-user rounded-br-[0.65rem]"
+                            : "rounded-br-md bg-gradient-to-r from-brand-midnight to-brand-tide/90 text-white shadow-sm"
+                          : patientMode
+                            ? "nira-chat-bubble-ai rounded-bl-[0.65rem]"
+                            : "rounded-bl-md bg-white text-ink shadow-sm ring-1 ring-black/[0.04]"
                       )}
                     >
                       {message.text.split("\n").map((line, lineIndex, lines) => (
@@ -993,33 +1467,62 @@ export function AIChatBox() {
                       <button
                         type="button"
                         onClick={() => speak(message.text)}
-                        className="mt-1 inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] text-muted hover:bg-white/80"
+                        className={cn(
+                          "mt-1 inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-medium transition",
+                          patientMode
+                            ? "border border-slate-200 bg-white text-slate-500 hover:border-brand-sky/20 hover:bg-brand-mint/40 hover:text-brand-tide"
+                            : "border border-slate-200/80 bg-white/90 text-slate-500 shadow-sm hover:border-brand-sky/30 hover:bg-brand-mint/30 hover:text-brand-tide"
+                        )}
                       >
                         <Volume2 className="h-3 w-3" />
                         Listen
                       </button>
                     ) : null}
-                    {message.summary ? (
-                      <div className="mt-2 rounded-2xl border border-brand-tide/10 bg-brand-mint/50 px-3 py-2 text-xs leading-5 text-muted">
-                        Summary: {message.summary}
+                    {showClinicianIntakeMeta && message.summary ? (
+                      <div className={cn(
+                        "mt-2 rounded-[1.1rem] px-3 py-2.5 text-xs leading-5",
+                        patientMode
+                          ? "border border-brand-sky/10 bg-brand-mint/40 text-muted"
+                          : "border border-brand-sky/15 bg-[linear-gradient(135deg,rgba(224,247,248,0.92),rgba(255,255,255,0.96))] text-muted shadow-sm"
+                      )}>
+                        <div className={cn("flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide", patientMode ? "text-brand-tide" : "text-brand-tide")}>
+                          <Sparkles className="h-3.5 w-3.5" />
+                          Clinical snapshot
+                        </div>
+                        <div className={cn("mt-1.5 text-sm leading-5", patientMode ? "text-ink" : "text-ink")}>{message.summary}</div>
                       </div>
                     ) : null}
-                    {message.escalationBand ? (
+                    {showClinicianIntakeMeta && message.detectedFocus ? (
+                      <div className={cn(
+                        "mt-2 inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold",
+                        patientMode
+                          ? "bg-brand-mint/60 text-brand-midnight ring-1 ring-brand-sky/20"
+                          : "bg-brand-mint/60 text-brand-midnight ring-1 ring-brand-sky/20"
+                      )}>
+                        Detected focus: {message.detectedFocus}
+                      </div>
+                    ) : null}
+                    {showClinicianIntakeMeta && message.escalationBand ? (
                       <div
                         className={cn(
                           "mt-2 inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-semibold",
                           message.escalationBand === "red"
-                            ? "bg-red-100 text-red-700"
+                            ? patientMode ? "bg-red-100 text-red-700" : "bg-red-100 text-red-700"
                             : message.escalationBand === "yellow"
-                              ? "bg-amber-100 text-amber-700"
-                              : "bg-emerald-100 text-emerald-700"
+                              ? patientMode ? "bg-amber-100 text-amber-700" : "bg-amber-100 text-amber-700"
+                              : patientMode ? "bg-emerald-100 text-emerald-700" : "bg-emerald-100 text-emerald-700"
                         )}
                       >
                         Escalation {message.escalationBand.toUpperCase()}
                       </div>
                     ) : null}
                     {Array.isArray(message.ddiWarnings) && message.ddiWarnings.length > 0 ? (
-                      <div className="mt-2 rounded-2xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900 shadow-soft">
+                      <div className={cn(
+                        "mt-2 rounded-2xl p-3 text-xs",
+                        patientMode
+                          ? "border border-amber-200 bg-amber-50 text-amber-900 shadow-soft"
+                          : "border border-amber-200 bg-amber-50 text-amber-900 shadow-soft"
+                      )}>
                         <div className="font-semibold">Drug interaction warnings</div>
                         <ul className="mt-2 list-disc space-y-1 pl-4">
                           {message.ddiWarnings.map((item, itemIndex) => (
@@ -1031,7 +1534,12 @@ export function AIChatBox() {
                       </div>
                     ) : null}
                     {Array.isArray(message.adherenceTips) && message.adherenceTips.length > 0 ? (
-                      <div className="mt-2 rounded-2xl border border-cyan-200 bg-cyan-50 p-3 text-xs text-cyan-900 shadow-soft">
+                      <div className={cn(
+                        "mt-2 rounded-2xl p-3 text-xs",
+                        patientMode
+                          ? "border border-cyan-200 bg-cyan-50 text-cyan-900 shadow-soft"
+                          : "border border-cyan-200 bg-cyan-50 text-cyan-900 shadow-soft"
+                      )}>
                         <div className="font-semibold">Medication adherence</div>
                         <ul className="mt-2 list-disc space-y-1 pl-4">
                           {message.adherenceTips.map((tip, tipIndex) => (
@@ -1041,12 +1549,22 @@ export function AIChatBox() {
                       </div>
                     ) : null}
                     {message.fallbackChannels?.reason ? (
-                      <div className="mt-2 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
+                      <div className={cn(
+                        "mt-2 rounded-2xl px-3 py-2 text-[11px]",
+                        patientMode
+                          ? "border border-slate-200 bg-slate-50 text-slate-700"
+                          : "border border-slate-200 bg-slate-50 text-slate-700"
+                      )}>
                         Fallback: {message.fallbackChannels.reason}
                       </div>
                     ) : null}
                     {message.appointment ? (
-                      <div className="mt-2 rounded-2xl border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900 shadow-soft">
+                      <div className={cn(
+                        "mt-2 rounded-2xl p-3 text-xs",
+                        patientMode
+                          ? "border border-emerald-200 bg-emerald-50 text-emerald-900 shadow-soft"
+                          : "border border-emerald-200 bg-emerald-50 text-emerald-900 shadow-soft"
+                      )}>
                         <div className="flex items-center gap-2 font-semibold">
                           <CalendarClock className="h-4 w-4" />
                           Appointment booked
@@ -1058,7 +1576,12 @@ export function AIChatBox() {
                         <button
                           type="button"
                           onClick={() => navigate(`/patient/appointments/${message.appointment.appointment.id}?bucket=action`)}
-                          className="mt-3 inline-flex items-center gap-2 rounded-full bg-emerald-600 px-3 py-1.5 text-white transition hover:bg-emerald-700"
+                          className={cn(
+                            "mt-3 inline-flex items-center gap-2 rounded-full px-3 py-1.5 transition",
+                            patientMode
+                              ? "bg-emerald-600 text-white hover:bg-emerald-700"
+                              : "bg-emerald-600 text-white hover:bg-emerald-700"
+                          )}
                         >
                           Open appointment
                           <ArrowRight className="h-3.5 w-3.5" />
@@ -1067,39 +1590,20 @@ export function AIChatBox() {
                     ) : null}
                   </div>
                   {message.role === "user" && (
-                    <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-brand-midnight/10 ring-1 ring-brand-midnight/5">
-                      <User className="h-3.5 w-3.5 text-brand-midnight" />
+                    <div className={cn(
+                      "flex flex-shrink-0 items-center justify-center",
+                      patientMode
+                        ? "mt-1 h-9 w-9 rounded-[1rem] border border-brand-sky/10 bg-white"
+                        : "h-7 w-7 rounded-full bg-brand-midnight/10 ring-1 ring-brand-midnight/5"
+                    )}>
+                      <User className={cn(patientMode ? "h-4 w-4 text-brand-tide" : "h-3.5 w-3.5 text-brand-midnight")} />
                     </div>
                   )}
                 </motion.div>
               ))}
 
-              {patientMode && !inPrecheckQuestionnaire && bookingFlow.stage === "symptoms" ? (
-                <div className="rounded-2xl border border-brand-tide/10 bg-brand-mint/40 p-4 shadow-soft">
-                  <div className="flex items-center gap-2 text-sm font-semibold text-ink">
-                    <MessageCircle className="h-4 w-4 text-brand-tide" />
-                    Step 1 \u2014 Tell me your symptoms
-                  </div>
-                  <p className="mt-2 text-xs leading-5 text-muted">
-                    You can type the main complaint, how long it has been going on, and anything that makes it better or worse.
-                  </p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {SYMPTOM_EXAMPLE_PROMPTS.map((example) => (
-                      <button
-                        key={example}
-                        type="button"
-                        onClick={() => setInput(example)}
-                        className="rounded-full border border-brand-tide/10 bg-white px-3 py-1.5 text-xs font-medium text-ink transition hover:border-brand-tide/30 hover:bg-brand-mint"
-                      >
-                        {example}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : null}
-
-              {patientMode && !inPrecheckQuestionnaire && bookingFlow.stage === "doctor" ? (
-                <div className="space-y-3 rounded-2xl border border-brand-tide/10 bg-white/85 p-4 shadow-soft">
+              {patientMode && !inPrecheckSession && bookingFlow.stage === "doctor" ? (
+                <div className="nira-chat-soft-panel space-y-3 p-4">
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="flex items-center gap-2 text-sm font-semibold text-ink">
@@ -1108,28 +1612,48 @@ export function AIChatBox() {
                       </div>
                       <p className="mt-1 text-xs text-muted">Match based on your symptoms: {bookingFlow.symptoms || "not captured yet"}</p>
                     </div>
-                    <button type="button" onClick={resetBookingFlow} className="text-xs font-semibold text-brand-midnight hover:underline">
-                      Start over
+                    <button type="button" onClick={restartGuidedBooking} className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-muted transition hover:border-brand-sky/20 hover:bg-brand-mint/30 hover:text-brand-midnight">
+                      Restart booking
                     </button>
                   </div>
+
+                  {suggestedDoctorForBooking ? (
+                    <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-xs text-emerald-900">
+                      Suggested doctor: <span className="font-semibold">{suggestedDoctorForBooking.fullName}</span>
+                      {suggestedDoctorForBooking.specialty ? ` (${suggestedDoctorForBooking.specialty})` : ""}. If you want another doctor, pick any option below.
+                    </div>
+                  ) : null}
 
                   <div className="grid gap-2">
                     {rankedDoctors.map((doctor) => {
                       const slots = doctor.nextSchedule?.slots.filter((slot) => slot.status === "available").slice(0, 3) || [];
+                      const isRecommended = suggestedDoctorForBooking?.id === doctor.id;
                       return (
                         <button
                           key={doctor.id}
                           type="button"
                           onClick={() => chooseDoctor(doctor)}
-                          className="rounded-2xl border border-white/70 bg-surface-2 p-3 text-left transition hover:border-brand-sky hover:bg-brand-mint/30"
+                          className={cn(
+                            "rounded-[1.35rem] border p-3.5 text-left transition hover:-translate-y-0.5",
+                            isRecommended
+                              ? "border-emerald-300 bg-emerald-50 ring-1 ring-emerald-200"
+                              : "border-slate-200 bg-white hover:border-brand-sky/25 hover:bg-brand-mint/20"
+                          )}
                         >
                           <div className="flex items-start justify-between gap-3">
                             <div>
                               <div className="font-semibold text-ink">{doctor.fullName}</div>
                               <div className="text-xs text-muted">{doctor.specialty || "General Practice"}</div>
                             </div>
-                            <div className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-muted shadow-soft">
-                              {doctor.nextAvailableSlot ? `${formatDate(doctor.nextAvailableSlot.startAt)} \u00B7 ${formatTime(doctor.nextAvailableSlot.startAt)}` : "No slots"}
+                            <div className="flex flex-col items-end gap-1">
+                              {isRecommended ? (
+                                <span className="rounded-full bg-emerald-100 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+                                  Recommended
+                                </span>
+                              ) : null}
+                              <div className="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-muted">
+                                {doctor.nextAvailableSlot ? `${formatDate(doctor.nextAvailableSlot.startAt)} \u00B7 ${formatTime(doctor.nextAvailableSlot.startAt)}` : "No slots"}
+                              </div>
                             </div>
                           </div>
                           <div className="mt-2 flex flex-wrap gap-2">
@@ -1140,7 +1664,7 @@ export function AIChatBox() {
                                 </span>
                               ))
                             ) : (
-                              <span className="text-xs text-muted">Live slots loading\u2026</span>
+                              <span className="text-xs text-muted">Live slots loading...</span>
                             )}
                           </div>
                         </button>
@@ -1150,8 +1674,8 @@ export function AIChatBox() {
                 </div>
               ) : null}
 
-              {patientMode && !inPrecheckQuestionnaire && bookingFlow.stage === "slot" && selectedDoctor ? (
-                <div className="space-y-3 rounded-2xl border border-brand-tide/10 bg-white/85 p-4 shadow-soft">
+              {patientMode && !inPrecheckSession && bookingFlow.stage === "slot" && selectedDoctor ? (
+                <div className="nira-chat-soft-panel space-y-3 p-4">
                   <div>
                     <div className="flex items-center gap-2 text-sm font-semibold text-ink">
                       <CalendarDays className="h-4 w-4 text-brand-tide" />
@@ -1179,7 +1703,7 @@ export function AIChatBox() {
                             : "border-line bg-white text-muted hover:bg-surface-2"
                         )}
                       >
-                        {formatDate(`${date}T00:00:00+05:30`)} ({slotSummary.available})
+                        {formatDate(`${date}T00:00:00+05:30`)} ({reservedSlotDate === date && slotSummary.available === 0 ? "Reserved" : slotSummary.available})
                       </button>
                     ))}
                   </div>
@@ -1194,21 +1718,25 @@ export function AIChatBox() {
                           "rounded-xl border px-3 py-2 text-left text-sm font-semibold transition",
                           bookingFlow.slotId === slot.id
                             ? "border-brand-sky bg-brand-sky text-white"
+                            : slot.status === "reserved"
+                              ? "border-emerald-200 bg-emerald-50 text-ink hover:-translate-y-0.5"
                             : "border-cyan-200 bg-cyan-50 text-ink hover:-translate-y-0.5"
                         )}
                       >
                         <div>
                           {formatTime(slot.startAt)} - {formatTime(slot.endAt)}
                         </div>
-                        <div className="mt-1 text-[11px] font-normal opacity-80">Tap to continue</div>
+                        <div className="mt-1 text-[11px] font-normal opacity-80">
+                          {slot.status === "reserved" ? "Reserved for your triage" : "Tap to continue"}
+                        </div>
                       </button>
                     ))}
                   </div>
                 </div>
               ) : null}
 
-              {patientMode && !inPrecheckQuestionnaire && bookingFlow.stage === "confirm" && selectedDoctor && bookingFlow.slotId && selectedSchedule ? (
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 shadow-soft">
+              {patientMode && !inPrecheckSession && bookingFlow.stage === "confirm" && selectedDoctor && bookingFlow.slotId && selectedSchedule ? (
+                <div className="nira-chat-soft-panel p-4">
                   <div className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
                     <CheckCircle2 className="h-4 w-4" />
                     Step 4 \u2014 Confirm booking
@@ -1235,10 +1763,10 @@ export function AIChatBox() {
                     </button>
                     <button
                       type="button"
-                      onClick={resetBookingFlow}
+                      onClick={restartGuidedBooking}
                       className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-white px-4 py-2 text-sm font-semibold text-emerald-900 transition hover:bg-emerald-100"
                     >
-                      Change details
+                      Change doctor or slot
                     </button>
                   </div>
                 </div>
@@ -1246,10 +1774,23 @@ export function AIChatBox() {
 
               {typing && (
                 <div className="flex items-center gap-2">
-                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gradient-to-br from-brand-tide to-brand-sky shadow-sm">
-                    <Bot className="h-3.5 w-3.5 text-white" />
+                  <div className={cn(
+                    "flex items-center justify-center",
+                    patientMode
+                      ? "h-9 w-9 rounded-[1rem] border border-brand-sky/20 bg-gradient-to-br from-brand-mint via-white to-brand-mint/70 p-1 shadow-sm ring-1 ring-white/90"
+                      : "h-7 w-7 rounded-full border border-brand-sky/30 bg-white p-0.5 shadow-md shadow-brand-tide/20 ring-1 ring-white"
+                  )}>
+                    <NiraChatbotMark
+                      size={patientMode ? "md" : "sm"}
+                      className={patientMode ? "h-7 w-7" : "h-6 w-6"}
+                    />
                   </div>
-                  <div className="rounded-2xl rounded-bl-md bg-white px-4 py-3 shadow-sm ring-1 ring-black/[0.04]">
+                  <div className={cn(
+                    "rounded-2xl rounded-bl-md px-4 py-3",
+                    patientMode
+                      ? "nira-chat-bubble-ai"
+                      : "bg-white shadow-sm ring-1 ring-black/[0.04]"
+                  )}>
                     <div className="flex gap-1.5">
                       <span className="h-2 w-2 animate-bounce rounded-full bg-brand-tide/60" style={{ animationDelay: "0ms" }} />
                       <span className="h-2 w-2 animate-bounce rounded-full bg-brand-sky/60" style={{ animationDelay: "150ms" }} />
@@ -1261,25 +1802,33 @@ export function AIChatBox() {
               <div ref={bottomRef} />
             </div>
 
-            <div className="border-t border-slate-100 bg-white/90 p-3 backdrop-blur-sm">
+            <div className={cn(
+              patientMode
+                ? "border-t border-slate-200/80 bg-white/95 px-3 pb-3 pt-3 backdrop-blur-xl sm:px-4 sm:pb-4"
+                : "border-t border-slate-100 bg-white/90 p-3 backdrop-blur-sm"
+            )}>
               <form
                 onSubmit={(event) => {
                   event.preventDefault();
                   handleSend();
                 }}
-                className="flex items-center gap-2"
+                className={cn("flex items-center gap-2", patientMode ? "nira-chat-composer" : "")}
               >
                 <button
                   type="button"
                   onClick={toggleListening}
-                  disabled={guestMode}
+                  disabled={guestMode || precheckSessionClosedForInput}
                   aria-label="Voice input"
                   className={cn(
                     "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl border transition-all",
                     isListening
-                      ? "animate-pulse border-brand-sky bg-brand-sky/10 text-brand-sky shadow-sm shadow-brand-sky/20"
-                      : "border-slate-200 bg-white text-slate-500 hover:border-brand-sky/40 hover:bg-brand-mint/30 hover:text-brand-tide",
-                    guestMode ? "cursor-not-allowed opacity-50" : ""
+                      ? patientMode
+                        ? "animate-pulse border-brand-sky/30 bg-brand-mint text-brand-tide shadow-sm shadow-brand-sky/20"
+                        : "border-brand-sky bg-brand-sky/10 text-brand-sky shadow-sm shadow-brand-sky/20"
+                      : patientMode
+                        ? "border-slate-200 bg-white text-slate-500 hover:border-brand-sky/25 hover:bg-brand-mint/30 hover:text-brand-tide"
+                        : "border-slate-200 bg-white text-slate-500 hover:border-brand-sky/40 hover:bg-brand-mint/30 hover:text-brand-tide",
+                    guestMode || precheckSessionClosedForInput ? "cursor-not-allowed opacity-50" : ""
                   )}
                   title="Voice input"
                 >
@@ -1291,28 +1840,42 @@ export function AIChatBox() {
                   onChange={(event) => setInput(event.target.value)}
                   aria-label="Type your message"
                   placeholder={
-                    precheckFlow.active && !precheckFlow.completed
-                      ? precheckFlow.phase === "generating"
-                        ? "Generating questions..."
+                    precheckSessionClosedForInput
+                      ? precheckFlow.phase === "unavailable"
+                        ? "AI pre-check unavailable. Close and try again."
+                        : "Pre-check submitted. Close to return to the chatbot."
+                      : precheckFlow.active && !precheckFlow.completed
+                      ? precheckFlow.phase === "preparing"
+                        ? "Preparing AI questions..."
                         : "Type your answer..."
                       : guestMode
                       ? "Ask about login, signup, or support..."
                       : bookingFlow.stage === "symptoms"
                       ? "Describe your symptoms..."
                       : bookingFlow.stage === "doctor"
-                        ? "Tap a doctor or type more..."
+                        ? "Choose a doctor or ask for another one..."
                         : bookingFlow.stage === "slot"
                           ? "Choose a slot above..."
                           : "Review and confirm..."
                   }
-                  disabled={precheckFlow.phase === "generating"}
-                  className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm text-ink placeholder:text-slate-400 outline-none transition-all focus:border-brand-tide/50 focus:ring-2 focus:ring-brand-tide/10 disabled:bg-slate-50 disabled:cursor-not-allowed"
+                  disabled={precheckFlow.phase === "preparing" || precheckSessionClosedForInput}
+                  className={cn(
+                    "flex-1 rounded-xl px-4 py-2.5 text-sm outline-none transition-all disabled:cursor-not-allowed",
+                    patientMode
+                      ? "border border-slate-200 bg-white text-ink placeholder:text-slate-400 focus:border-brand-tide/50 focus:ring-2 focus:ring-brand-tide/10 disabled:bg-slate-50"
+                      : "border border-slate-200 bg-white text-ink placeholder:text-slate-400 focus:border-brand-tide/50 focus:ring-2 focus:ring-brand-tide/10 disabled:bg-slate-50"
+                  )}
                 />
                 <button
                   type="submit"
-                  disabled={!input.trim() || typing || precheckFlow.submitting || precheckFlow.phase === "generating"}
+                  disabled={!input.trim() || typing || precheckFlow.submitting || precheckFlow.phase === "preparing" || precheckSessionClosedForInput}
                   aria-label="Send message"
-                  className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-brand-tide to-brand-sky text-white shadow-sm transition-all hover:shadow-md hover:shadow-brand-sky/25 disabled:opacity-40 disabled:shadow-none"
+                  className={cn(
+                    "flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl text-white transition-all disabled:opacity-40 disabled:shadow-none",
+                    patientMode
+                      ? "bg-gradient-to-r from-brand-tide to-brand-sky shadow-sm hover:shadow-md hover:shadow-brand-sky/25"
+                      : "bg-gradient-to-r from-brand-tide to-brand-sky shadow-sm hover:shadow-md hover:shadow-brand-sky/25"
+                  )}
                 >
                   <Send className="h-4 w-4" />
                 </button>
@@ -1341,6 +1904,51 @@ function buildGuestSupportReply(latestText) {
   }
 
   return "Before login, I can help only with login/signup steps and support contact guidance. Once you log in as a patient, I can assist with booking appointments.";
+}
+
+function createEmptyBookingFlow() {
+  return {
+    stage: "symptoms",
+    symptoms: "",
+    doctorId: "",
+    slotDate: "",
+    slotId: "",
+  };
+}
+
+function buildPostTriageBookingReply(suggestedDoctor) {
+  if (!suggestedDoctor) {
+    return "Your triage has been converted to EMR.\n\nChoose a doctor below, and I'll show the available appointment slots next.";
+  }
+
+  return `Your triage has been converted to EMR.\n\nBased on what you shared, I suggest ${suggestedDoctor.fullName}${suggestedDoctor.specialty ? ` (${suggestedDoctor.specialty})` : ""}. If you want another doctor, choose from the full list below and I'll show the available appointment slots next.`;
+}
+
+function createEmptyPrecheckFlow() {
+  return {
+    active: false,
+    phase: null,
+    appointmentId: null,
+    questionnaireId: null,
+    appointmentContext: null,
+    dynamicQuestions: [],
+    currentDynamicIndex: 0,
+    responses: {},
+    rawResponses: {},
+    adaptive: true,
+    targetQuestionCount: DEFAULT_ADAPTIVE_PRECHECK_TARGET,
+    completed: false,
+    submitting: false,
+    sessionContextKey: "",
+  };
+}
+
+function buildPrecheckSessionContextKey(baseContextKey, appointmentId) {
+  if (!appointmentId) {
+    return baseContextKey;
+  }
+
+  return `${baseContextKey}:precheck:${appointmentId}`;
 }
 
 function buildGuidedBookingUpdate({ latestText, bookingFlow, doctors, offlineMode = false }) {
@@ -1378,8 +1986,8 @@ function buildGuidedBookingUpdate({ latestText, bookingFlow, doctors, offlineMod
     if (bookingIntent) {
       return {
         replyText: offlineMode
-          ? "I can help with booking, but first I need your symptoms or reason for visit. Share that and I'll show doctors and slots."
-          : "I can help with booking, but first tell me your symptoms or reason for visit. After that I'll show doctors and live slots.",
+          ? "I can help with booking, but first share the reason for your visit or main concern. Then I’ll show doctors and available slots."
+          : "I can help with booking, but first share the reason for your visit or main concern. After that I’ll show doctors and live slots.",
       };
     }
   }
@@ -1417,7 +2025,7 @@ function isLikelySymptomInput(latestText, bookingIntent) {
 
   if (hasTimeline || hasSeverity) return true;
 
-  return !bookingIntent && text.length >= 12;
+  return false;
 }
 
 function rankDoctorsForSymptoms(doctors, symptomsText) {
@@ -1435,6 +2043,32 @@ function rankDoctorsForSymptoms(doctors, symptomsText) {
     const rightTime = right.nextAvailableSlot ? new Date(right.nextAvailableSlot.startAt).getTime() : Number.MAX_SAFE_INTEGER;
     return leftTime - rightTime;
   });
+}
+
+function findDoctorFromText(doctors, latestText) {
+  const lower = String(latestText || "").toLowerCase().trim();
+  if (!lower || lower.length < 3) {
+    return null;
+  }
+
+  return doctors.find((doctor) => {
+    const fullName = String(doctor.fullName || "").toLowerCase();
+    const normalizedName = fullName.replace(/^dr\.?\s*/, "");
+    const specialty = String(doctor.specialty || "").toLowerCase();
+
+    if (fullName.includes(lower) || normalizedName.includes(lower) || lower.includes(normalizedName)) {
+      return true;
+    }
+
+    if (specialty && specialty.length > 3 && lower.includes(specialty)) {
+      return true;
+    }
+
+    return normalizedName
+      .split(/\s+/)
+      .filter((part) => part.length > 2)
+      .some((part) => lower.includes(part));
+  }) || null;
 }
 
 function scoreDoctorForSymptoms(doctor, lowerSymptoms) {
@@ -1472,7 +2106,7 @@ function buildOfflineFallbackReply({ latestText }) {
   if (EMERGENCY_INTENT_REGEX.test(lower)) {
     return {
       text: "Your symptoms may indicate an emergency. Please call emergency services now or go to the nearest emergency department immediately.",
-      summary: "Potential emergency red-flag symptoms mentioned in offline mode.",
+      summary: "",
       triageLevel: "emergency",
     };
   }
@@ -1480,14 +2114,14 @@ function buildOfflineFallbackReply({ latestText }) {
   if (BOOKING_INTENT_REGEX.test(lower)) {
     return {
       text: "I can help with booking, but first share your symptoms or reason for visit. Then I'll show doctors and available slots.",
-      summary: "Appointment booking requested while live intake service unavailable.",
+      summary: "",
       triageLevel: "routine",
     };
   }
 
   return {
-    text: "I couldn't reach the live intake service, but I can still help. Please share your main symptom, when it started, and severity (mild/moderate/severe).",
-    summary: "Clinical intake assessment in progress (offline fallback mode).",
+    text: "I’m ready to help. Tell me your main concern, when it started, and whether it feels better or worse at different times.",
+    summary: "",
     triageLevel: "routine",
   };
 }
@@ -1496,6 +2130,7 @@ function normalizePrecheckAnswer(question, answerText) {
   const type = String(question?.type || "text").toLowerCase();
   const options = Array.isArray(question?.options) ? question.options : [];
   const required = question?.required !== false;
+  const questionText = String(question?.question || "").toLowerCase();
   const raw = String(answerText || "").trim();
   const lower = raw.toLowerCase();
 
@@ -1515,8 +2150,10 @@ function normalizePrecheckAnswer(question, answerText) {
   }
 
   if (type === "yesno") {
-    if (["yes", "y"].includes(lower)) return { isValid: true, value: "yes" };
-    if (["no", "n"].includes(lower)) return { isValid: true, value: "no" };
+    const hasYes = /\b(yes|yep|yeah|y)\b/i.test(raw);
+    const hasNo = /\b(no|nope|nah|n)\b/i.test(raw);
+    if (hasYes && !hasNo) return { isValid: true, value: "yes" };
+    if (hasNo && !hasYes) return { isValid: true, value: "no" };
     return { isValid: false, message: "Please answer with yes or no." };
   }
 
@@ -1529,157 +2166,105 @@ function normalizePrecheckAnswer(question, answerText) {
   }
 
   if (type === "rating") {
-    const numeric = Number(raw);
+    const numericMatch = raw.match(/\b([1-9]|10)(?:\s*\/\s*10)?\b/);
+    const numeric = numericMatch ? Number(numericMatch[1]) : Number(raw);
     if (!Number.isFinite(numeric) || numeric < 1 || numeric > 10) {
       return { isValid: false, message: "Please enter a number between 1 and 10." };
     }
     return { isValid: true, value: String(Math.round(numeric)) };
   }
 
+  if (type === "text" && /when did.*start|how long|duration|since when/.test(questionText)) {
+    if (/^\d+$/.test(raw) || !/\b(today|yesterday|tonight|since|hour|hours|day|days|week|weeks|month|months|year|years)\b/i.test(raw)) {
+      return {
+        isValid: false,
+        message: "Please include the time unit, for example '3 days' or 'since yesterday'."
+      };
+    }
+  }
+
   return { isValid: true, value: raw };
 }
 
-function buildPatientContextString(patient) {
-  if (!patient) return "";
-  const parts = [];
-  if (patient.age) parts.push(`Age: ${patient.age}`);
-  if (patient.gender) parts.push(`Gender: ${patient.gender}`);
-  if (patient.medicalHistory) parts.push(`History: ${patient.medicalHistory}`);
-  if (patient.currentMedications) parts.push(`Medications: ${patient.currentMedications}`);
-  if (patient.allergies) parts.push(`Allergies: ${patient.allergies}`);
-  return parts.join(". ");
+function getQuestionnaireByAppointmentId(state, appointmentId) {
+  if (!appointmentId) {
+    return null;
+  }
+
+  return Object.values(state?.precheckQuestionnaires?.byId || {}).find(
+    (questionnaire) => questionnaire?.appointmentId === appointmentId
+  ) || null;
 }
 
-function normalizeDynamicQuestions(raw, seedAnswers) {
-  if (!Array.isArray(raw) || raw.length === 0) return [];
-
-  return raw
-    .filter((q) => {
-      const text = String(q.question || q.text || "").toLowerCase();
-      const isRedundantReason = /what.*(concern|problem|complaint|brings you)/i.test(text);
-      const isRedundantDuration = /how long|when did.*start|duration/i.test(text);
-      return !isRedundantReason && !isRedundantDuration;
-    })
-    .map((q, index) => ({
-      id: `dynamic-${index + 1}`,
-      question: q.question || q.text || `Follow-up question ${index + 1}`,
-      type: q.type || (q.answer_type === "boolean" ? "yesno" : q.options?.length ? "multiple_choice" : "text"),
-      options: q.options || [],
-      required: q.required !== false,
-      category: q.category || "general",
-    }));
+function getQuestionnaireQuestions(questionnaire) {
+  return questionnaire?.editedQuestions?.length
+    ? questionnaire.editedQuestions
+    : questionnaire?.aiQuestions || [];
 }
 
-function buildFallbackDynamicQuestions(seedAnswers, context) {
-  const complaint = (seedAnswers.reason || "").toLowerCase();
-  const questions = [];
+function countAnsweredPrecheckResponses(questionnaire) {
+  const responses = questionnaire?.patientResponses || {};
+  return Object.values(responses).filter((value) => String(value || "").trim()).length;
+}
 
-  questions.push({
-    id: "dynamic-1",
-    question: "How severe is your main symptom right now on a scale of 1 (mild) to 10 (worst)?",
-    type: "rating",
-    required: true,
-    category: "severity",
-  });
+function getAdaptiveTargetQuestionCount(questionnaire, fallback = DEFAULT_ADAPTIVE_PRECHECK_TARGET) {
+  const numeric = Number(questionnaire?.metadata?.targetQuestionCount);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.max(1, Math.round(numeric));
+}
 
-  questions.push({
-    id: "dynamic-2",
-    question: "Do you have any urgent warning signs such as severe breathlessness, high fever, chest pain, confusion, or fainting?",
-    type: "yesno",
-    required: true,
-    category: "red_flags",
-  });
+function buildPrecheckConversationMessages(questionnaire, totalQuestions) {
+  const questions = getQuestionnaireQuestions(questionnaire);
+  const responses = questionnaire?.patientResponses || {};
+  const rawResponses = questionnaire?.metadata?.rawPatientResponses || {};
+  const messages = [];
 
-  if (/fever|temperature|chills|viral|infection/i.test(complaint)) {
-    questions.push({
-      id: "dynamic-3",
-      question: "What is the highest temperature recorded, and do you have body aches, sore throat, or rash along with it?",
-      type: "text",
-      required: true,
-      category: "symptoms",
+  for (let index = 0; index < questions.length; index += 1) {
+    const question = questions[index];
+    const answer = String(rawResponses?.[question.id] || responses?.[question.id] || "").trim();
+
+    messages.push({
+      role: "ai",
+      text: buildDynamicQuestionPrompt(question, index + 1, totalQuestions),
+      time: new Date(),
+      meta: `precheck-q-${question.id}`,
     });
-  } else if (/pain|ache|hurt|sore/i.test(complaint)) {
-    questions.push({
-      id: "dynamic-3",
-      question: "Can you describe the pain \u2014 is it sharp, dull, throbbing, or burning? Does anything make it better or worse?",
-      type: "text",
-      required: true,
-      category: "symptoms",
-    });
-  } else if (/cough|breath|wheez|asthma|chest tight/i.test(complaint)) {
-    questions.push({
-      id: "dynamic-3",
-      question: "Is the cough dry or productive? Do you experience difficulty breathing, especially when lying down or during activity?",
-      type: "text",
-      required: true,
-      category: "symptoms",
-    });
-  } else if (/stomach|abdomen|nausea|vomit|diarr|constip|acid|gastro|bloat/i.test(complaint)) {
-    questions.push({
-      id: "dynamic-3",
-      question: "Is the discomfort related to meals? Have you noticed vomiting, changes in stool, or severe abdominal pain?",
-      type: "text",
-      required: true,
-      category: "symptoms",
-    });
-  } else {
-    questions.push({
-      id: "dynamic-3",
-      question: "Are there any other symptoms alongside your main concern? (e.g., nausea, dizziness, fatigue, appetite changes)",
-      type: "text",
-      required: true,
-      category: "symptoms",
+
+    if (!answer) {
+      break;
+    }
+
+    messages.push({
+      role: "user",
+      text: answer,
+      time: new Date(),
+      meta: `precheck-a-${question.id}`,
     });
   }
 
-  questions.push({
-    id: "dynamic-4",
-    question: "What medicines, supplements, or home remedies are you currently taking?",
-    type: "text",
-    required: true,
-    category: "medications",
-  });
-
-  return questions;
+  return messages;
 }
 
 function buildDynamicQuestionPrompt(question, questionNumber, totalQuestions) {
-  const title = `Q${questionNumber}/${totalQuestions}: ${question?.question || `Question ${questionNumber}`}`;
-  const type = String(question?.type || "text").toLowerCase();
-  const options = Array.isArray(question?.options) ? question.options : [];
-  const required = question?.required !== false;
-
-  if (type === "yesno") {
-    return `${title}\nPlease reply: yes or no.${required ? "" : " (You can type 'skip' if not sure.)"}`;
-  }
-  if (type === "multiple_choice" && options.length > 0) {
-    return `${title}\nChoose one: ${options.join(" | ")}.${required ? "" : " (You can type 'skip' if needed.)"}`;
-  }
-  if (type === "rating") {
-    return `${title}\nPlease answer with a number from 1 to 10.${required ? "" : " (Or type 'skip'.)"}`;
-  }
-  return `${title}${required ? "" : "\nOptional: you may type 'skip' if this does not apply."}`;
+  return question?.question || `Question ${questionNumber}`;
 }
 
 function getPrecheckProgressLabel(flow) {
-  const totalDynamic = flow.dynamicQuestions?.length || 4;
-  const total = totalDynamic + 2;
-  if (flow.phase === "seed_reason") return "Question 1 of ~6";
-  if (flow.phase === "seed_duration") return "Question 2 of ~6";
-  if (flow.phase === "generating") return "Preparing tailored questions...";
-  if (flow.phase === "dynamic") return `Question ${flow.currentDynamicIndex + 3} of ${total}`;
+  const total = Math.max(flow.targetQuestionCount || 0, flow.dynamicQuestions?.length || 0);
+  if (flow.phase === "preparing") return "Preparing adaptive questions...";
+  if (flow.phase === "dynamic") return `Question ${flow.currentDynamicIndex + 1} of ${total}`;
   if (flow.phase === "submitting") return "Submitting...";
+  if (flow.phase === "unavailable") return "AI questionnaire unavailable";
   if (flow.phase === "complete" || flow.completed) return "Complete!";
   return "";
 }
 
 function getPrecheckProgressPercent(flow) {
-  const totalDynamic = flow.dynamicQuestions?.length || 4;
-  const total = totalDynamic + 2;
-  if (flow.phase === "seed_reason") return Math.round((0 / total) * 100);
-  if (flow.phase === "seed_duration") return Math.round((1 / total) * 100);
-  if (flow.phase === "generating") return Math.round((2 / total) * 100);
-  if (flow.phase === "dynamic") return Math.round(((flow.currentDynamicIndex + 2) / total) * 100);
+  const total = Math.max(flow.targetQuestionCount || 0, flow.dynamicQuestions?.length || 0);
+  if (flow.phase === "preparing") return 8;
+  if (flow.phase === "dynamic" && total > 0) return Math.round(((flow.currentDynamicIndex + 1) / total) * 100);
   if (flow.phase === "submitting" || flow.phase === "complete" || flow.completed) return 100;
   return 0;
 }

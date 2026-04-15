@@ -1,0 +1,10 @@
+.git
+.gitignore
+.codemeter
+node_modules
+dist
+coverage
+*.log
+.env
+.env.local
+supabase/.temp

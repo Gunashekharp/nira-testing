@@ -1,0 +1,10 @@
+{
+  "name": "nira-converter-agent",
+  "private": true,
+  "version": "0.0.0",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

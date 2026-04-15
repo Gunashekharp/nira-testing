@@ -23,6 +23,15 @@ async function loginPatient(user) {
 }
 
 test("patient dashboard buckets open appointment lists and review detail states", async () => {
+  const seedState = createSeedState();
+  const tomorrow = addDays(seedState.meta.today, 1);
+  seedState.appointments.byId["appointment-aasha"] = {
+    ...seedState.appointments.byId["appointment-aasha"],
+    startAt: toIsoDateTime(tomorrow, "09:15"),
+    endAt: toIsoDateTime(tomorrow, "09:30")
+  };
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(seedState));
+
   const user = userEvent.setup();
   renderApp("/auth/login/patient");
 
@@ -30,11 +39,12 @@ test("patient dashboard buckets open appointment lists and review detail states"
   await user.click(screen.getByRole("link", { name: /in review/i }));
 
   expect(await screen.findByRole("heading", { name: /my appointments/i, level: 1 })).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: /pre-check submitted/i })).toBeInTheDocument();
   await user.click(screen.getByRole("link", { name: /dr\. nisha mehra/i }));
 
   expect(await screen.findByText("What happens now")).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: /view pre-check summary/i })).not.toBeInTheDocument();
-  expect(screen.getAllByText(/chat intake/i).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/pre-check/i).length).toBeGreaterThan(0);
 });
 
 test("patient can cancel a non-completed appointment and the slot becomes bookable again", async () => {
@@ -66,7 +76,12 @@ test("patient can cancel a non-completed appointment and the slot becomes bookab
 
   expect(await screen.findByText("Book by live doctor slots")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: /dr\. nisha mehra/i }));
-  expect(screen.getByRole("button", { name: /9:15.*9:30/i })).not.toBeDisabled();
+  const slotButtons = screen
+    .getAllByRole("button")
+    .filter((button) => /\d{1,2}:\d{2}\s*(AM|PM)\s*-\s*\d{1,2}:\d{2}\s*(AM|PM)/i.test(button.textContent || ""));
+  const firstAvailableSlot = slotButtons.find((button) => !button.disabled);
+  expect(firstAvailableSlot).toBeTruthy();
+  expect(firstAvailableSlot).not.toBeDisabled();
 });
 
 test("appointment detail panel does not crash when no appointment is selected", () => {

@@ -9,7 +9,7 @@ import { Field, Input, Select } from "../../components/ui/FormFields";
 import { useDemoData } from "../../app/DemoDataProvider";
 import { getBookableDoctors, getPatientWorkspace, getScheduleByDate } from "../shared/selectors";
 import { formatDate, formatDayKey, formatTime } from "../../lib/format";
-import { getDateRange } from "../../lib/schedule";
+import { getDateRange, getTodayDayKey } from "../../lib/schedule";
 import { usePatientLanguage } from "./usePatientLanguage";
 
 function getDoctorRating(doctorId) {
@@ -19,6 +19,29 @@ function getDoctorRating(doctorId) {
 
   const tail = doctorId.charCodeAt(doctorId.length - 1) % 3;
   return (4.7 + tail * 0.1).toFixed(1);
+}
+
+function getSlotStartTimeMs(slot) {
+  const startTimeMs = new Date(slot?.startAt || "").getTime();
+  if (Number.isFinite(startTimeMs)) {
+    return startTimeMs;
+  }
+
+  const endTimeMs = new Date(slot?.endAt || "").getTime();
+  return Number.isFinite(endTimeMs) ? endTimeMs : Number.NaN;
+}
+
+function isLiveAvailableSlot(slot, referenceMs = Date.now()) {
+  if (!slot || slot.status !== "available") {
+    return false;
+  }
+
+  const startTimeMs = getSlotStartTimeMs(slot);
+  return Number.isFinite(startTimeMs) && startTimeMs >= referenceMs;
+}
+
+function getLiveAvailableSlots(schedule, referenceMs = Date.now()) {
+  return (schedule?.slots || []).filter((slot) => isLiveAvailableSlot(slot, referenceMs));
 }
 
 export function BookingPage() {
@@ -67,19 +90,39 @@ export function BookingPage() {
   const [confirmationId, setConfirmationId] = useState("");
 
   const doctor = doctors.find((item) => item.id === selectedDoctorId) || null;
-  const dateOptions = useMemo(() => getDateRange(state.meta.today, 14), [state.meta.today]);
+  const bookingWindowStart = useMemo(() => {
+    const clinicToday = getTodayDayKey();
+    return state.meta.today && state.meta.today > clinicToday ? state.meta.today : clinicToday;
+  }, [state.meta.today]);
+  const dateOptions = useMemo(() => getDateRange(bookingWindowStart, 14), [bookingWindowStart]);
   const schedules = useMemo(
-    () =>
-      doctor
-        ? dateOptions.map((date) => ({
+    () => {
+      if (!doctor) {
+        return [];
+      }
+
+      const referenceMs = Date.now();
+
+      return dateOptions
+        .map((date) => {
+          const schedule = getScheduleByDate(state, doctor.id, date);
+          const liveSlots = getLiveAvailableSlots(schedule, referenceMs);
+
+          return {
             date,
-            schedule: getScheduleByDate(state, doctor.id, date)
-          }))
-        : [],
+            schedule,
+            liveSlots,
+            availableCount: liveSlots.length
+          };
+        })
+        .filter((entry) => entry.availableCount > 0);
+    },
     [dateOptions, doctor, state]
   );
-  const selectedSchedule = doctor ? getScheduleByDate(state, doctor.id, selectedDate) : null;
-  const selectedSlot = selectedSchedule?.slots.find((slot) => slot.id === selectedSlotId) || null;
+  const selectedScheduleEntry = schedules.find((entry) => entry.date === selectedDate) || null;
+  const selectedSchedule = selectedScheduleEntry?.schedule || null;
+  const selectedScheduleSlots = selectedScheduleEntry?.liveSlots || [];
+  const selectedSlot = selectedScheduleSlots.find((slot) => slot.id === selectedSlotId) || null;
   const confirmationBundle = confirmationId ? state.appointments.byId[confirmationId] : null;
   const visibleDoctors = isRescheduleMode && doctor
     ? [doctor]
@@ -102,21 +145,39 @@ export function BookingPage() {
       return;
     }
 
-    const nextWithAvailability = schedules.find((entry) => entry.schedule?.slotSummary.available > 0);
+    const nextWithAvailability = schedules[0] || null;
     const preferredDate = isRescheduleMode && rescheduleAppointment?.doctorId === doctor.id
-      ? nextWithAvailability?.date || state.meta.today
-      : nextWithAvailability?.date || state.meta.today;
+      ? nextWithAvailability?.date || ""
+      : nextWithAvailability?.date || "";
 
     setSelectedDate(preferredDate);
     setSelectedSlotId("");
-  }, [doctor?.id, isRescheduleMode, rescheduleAppointment?.doctorId, schedules, state.meta.today]);
+  }, [doctor?.id, isRescheduleMode, rescheduleAppointment?.doctorId, schedules]);
 
   useEffect(() => {
     setSelectedSlotId("");
   }, [selectedDate, selectedDoctorId, selectedSchedule?.id]);
 
+  function openPrecheckForAppointment(appointment) {
+    if (!appointment || typeof window === "undefined") {
+      return;
+    }
+
+    const appointmentDoctor = state.doctors.byId[appointment.doctorId] || null;
+
+    window.dispatchEvent(new CustomEvent("nira:open-precheck", {
+      detail: {
+        appointmentId: appointment.id,
+        doctorName: appointmentDoctor?.fullName,
+        specialty: appointmentDoctor?.specialty,
+        startAt: appointment.startAt,
+        hasDoctorQuestions: appointment?.precheckQuestionnaire?.status === "sent_to_patient"
+      }
+    }));
+  }
+
   async function handleBooking() {
-    if (!selectedSlotId || !doctor) {
+    if (!selectedSlotId || !selectedDate || !doctor) {
       return;
     }
 
@@ -183,9 +244,9 @@ export function BookingPage() {
           ) : null}
           <div className={`grid gap-3 ${selectedDoctorId ? "" : "lg:grid-cols-2"}`}>
             {visibleDoctors.map((entry) => {
-              const quickSlots = getDateRange(state.meta.today, 14)
+              const quickSlots = getDateRange(bookingWindowStart, 14)
                 .map((date) => getScheduleByDate(state, entry.id, date))
-                .flatMap((schedule) => (schedule?.slots || []).filter((slot) => slot.status === "available"))
+                .flatMap((schedule) => getLiveAvailableSlots(schedule))
                 .slice(0, 3);
               const isSelected = selectedDoctorId === entry.id;
 
@@ -249,7 +310,7 @@ export function BookingPage() {
           <div className="space-y-4">
             <div className="-mx-1 overflow-x-auto px-1 pb-1">
               <div className="inline-flex min-w-full gap-2 sm:flex sm:flex-wrap">
-                {schedules.map(({ date, schedule }) => (
+                {schedules.map(({ date, availableCount }) => (
                   <button
                     key={date}
                     type="button"
@@ -260,14 +321,20 @@ export function BookingPage() {
                         : "border-line bg-white text-muted hover:bg-surface-2"
                     }`}
                   >
-                    {formatDayKey(date)} ({schedule?.slotSummary.available || 0})
+                    {formatDayKey(date)} ({availableCount})
                   </button>
                 ))}
               </div>
             </div>
 
+            {!schedules.length ? (
+              <div className="rounded-xl border border-dashed border-line bg-surface-2 p-4 text-sm text-muted">
+                No live upcoming slots are currently available for this doctor in the next 14 days.
+              </div>
+            ) : null}
+
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-              {(selectedSchedule?.slots || []).map((slot) => (
+              {selectedScheduleSlots.map((slot) => (
                 <button
                   key={slot.id}
                   type="button"
@@ -364,6 +431,10 @@ export function BookingPage() {
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="secondary" onClick={() => openPrecheckForAppointment(confirmationBundle)}>
+                  <FileText className="h-4 w-4" />
+                  Start pre-check
+                </Button>
                 <Button asChild>
                   <Link to={`/patient/appointments/${confirmationBundle.id}?bucket=${isRescheduleMode ? "upcoming" : "action"}`}>
                     <FileText className="h-4 w-4" />
@@ -371,6 +442,9 @@ export function BookingPage() {
                   </Link>
                 </Button>
               </div>
+            </div>
+            <div className="mt-3 text-sm text-emerald-900/90">
+              You can complete your pre-check now so the doctor gets your responses before consultation.
             </div>
           </Card>
         ) : null}

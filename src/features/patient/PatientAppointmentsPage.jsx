@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { Ban, Calendar, CalendarClock, History, Home, MapPin, PlusCircle, RotateCcw, Timer, XCircle } from "lucide-react";
+import { Ban, Calendar, CalendarClock, FileText, History, Home, MapPin, PlusCircle, RotateCcw, Timer, XCircle } from "lucide-react";
 import { AppShell } from "../../components/layout/AppShell";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
@@ -24,12 +24,12 @@ const bucketMeta = {
     description: "Booked slots that are still active."
   },
   action: {
-    label: "Action needed",
-    description: "Visits that still need your chat intake step."
+    label: "Pending pre-check",
+    description: "Upcoming visits where pre-check is still pending."
   },
   review: {
-    label: "In review",
-    description: "The doctor is reviewing or validating the visit."
+    label: "Pre-check submitted",
+    description: "Upcoming visits where your pre-check is already submitted to doctor."
   },
   missed: {
     label: "Missed",
@@ -73,6 +73,22 @@ function getSafeBucket(bucket) {
   return PATIENT_APPOINTMENT_BUCKETS.includes(bucket) ? bucket : "all";
 }
 
+function getBucketQueryFromTab(tab) {
+  if (tab === "past") {
+    return "completed";
+  }
+
+  if (tab === "pending-precheck") {
+    return "action";
+  }
+
+  if (tab === "precheck-submitted") {
+    return "review";
+  }
+
+  return tab;
+}
+
 export function PatientAppointmentsPage() {
   const { appointmentId } = useParams();
   const navigate = useNavigate();
@@ -81,14 +97,6 @@ export function PatientAppointmentsPage() {
   const { appointmentsByBucket } = getPatientWorkspace(state);
 
   const bucket = getSafeBucket(searchParams.get("bucket"));
-  const selectedAppointment =
-    (appointmentId ? getPatientAppointmentById(state, appointmentId) : null) ||
-    (!appointmentId ? appointmentsByBucket[bucket][0] || null : null);
-  const showCancelledNotice =
-    searchParams.get("notice") === "cancelled" &&
-    appointmentId &&
-    selectedAppointment?.id === appointmentId;
-
   const tabFromBucket =
     bucket === "completed"
       ? "past"
@@ -96,15 +104,31 @@ export function PatientAppointmentsPage() {
         ? "cancelled"
         : bucket === "missed"
           ? "missed"
-          : "upcoming";
+          : bucket === "action"
+            ? "pending-precheck"
+            : bucket === "review"
+              ? "precheck-submitted"
+              : "upcoming";
 
   const tabMap = {
     upcoming: [...appointmentsByBucket.upcoming, ...appointmentsByBucket.action, ...appointmentsByBucket.review]
+      .sort((left, right) => new Date(left.startAt) - new Date(right.startAt)),
+    "pending-precheck": [...appointmentsByBucket.action]
+      .sort((left, right) => new Date(left.startAt) - new Date(right.startAt)),
+    "precheck-submitted": [...appointmentsByBucket.review]
       .sort((left, right) => new Date(left.startAt) - new Date(right.startAt)),
     missed: [...appointmentsByBucket.missed].sort((left, right) => new Date(right.startAt) - new Date(left.startAt)),
     past: appointmentsByBucket.completed,
     cancelled: appointmentsByBucket.cancelled
   };
+
+  const selectedAppointment =
+    (appointmentId ? getPatientAppointmentById(state, appointmentId) : null) ||
+    (!appointmentId ? tabMap[tabFromBucket]?.[0] || null : null);
+  const showCancelledNotice =
+    searchParams.get("notice") === "cancelled" &&
+    appointmentId &&
+    selectedAppointment?.id === appointmentId;
 
   const monthlyDays = Array.from({ length: 30 }, (_, index) => {
     const date = new Date();
@@ -129,6 +153,22 @@ export function PatientAppointmentsPage() {
     });
   }
 
+  function openPrecheckForAppointment(appointment) {
+    if (!appointment || typeof window === "undefined") {
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent("nira:open-precheck", {
+      detail: {
+        appointmentId: appointment.id,
+        doctorName: appointment.doctor?.fullName,
+        specialty: appointment.doctor?.specialty,
+        startAt: appointment.startAt,
+        hasDoctorQuestions: appointment.precheckQuestionnaire?.status === "sent_to_patient"
+      }
+    }));
+  }
+
   return (
     <AppShell
       title={appointmentId ? "Appointment detail" : "My appointments"}
@@ -144,16 +184,18 @@ export function PatientAppointmentsPage() {
     >
       <div className="space-y-4">
         <div className="rounded-2xl border border-line bg-white p-1.5 sm:p-2">
-          <div className="grid gap-2 sm:grid-cols-4">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
             {[
               { key: "upcoming", label: "Upcoming", count: tabMap.upcoming.length, icon: Timer },
+              { key: "pending-precheck", label: "Pending pre-check", count: tabMap["pending-precheck"].length, icon: CalendarClock },
+              { key: "precheck-submitted", label: "Pre-check submitted", count: tabMap["precheck-submitted"].length, icon: Calendar },
               { key: "missed", label: "Missed", count: tabMap.missed.length, icon: RotateCcw },
               { key: "past", label: "Past", count: tabMap.past.length, icon: History },
               { key: "cancelled", label: "Cancelled", count: tabMap.cancelled.length, icon: Ban }
             ].map((tab) => (
               <Link
                 key={tab.key}
-                to={`/patient/appointments?bucket=${tab.key === "past" ? "completed" : tab.key}`}
+                to={`/patient/appointments?bucket=${getBucketQueryFromTab(tab.key)}`}
                 className={`rounded-xl px-2.5 py-2.5 text-center transition sm:px-4 sm:py-3 ${
                   tabFromBucket === tab.key
                     ? "bg-brand-sky text-white shadow-md"
@@ -179,11 +221,15 @@ export function PatientAppointmentsPage() {
               title={
                 tabFromBucket === "upcoming"
                   ? "Upcoming appointments"
-                  : tabFromBucket === "past"
-                    ? "Past appointments"
-                    : tabFromBucket === "missed"
-                      ? "Missed appointments"
-                      : "Cancelled appointments"
+                  : tabFromBucket === "pending-precheck"
+                    ? "Pending pre-check appointments"
+                    : tabFromBucket === "precheck-submitted"
+                      ? "Pre-check submitted appointments"
+                      : tabFromBucket === "past"
+                        ? "Past appointments"
+                        : tabFromBucket === "missed"
+                          ? "Missed appointments"
+                          : "Cancelled appointments"
               }
               description="Goal: one-tap reschedule and directions from each row."
               actions={<Badge tone={getBucketTone(bucket)}>{bucketMeta[bucket]?.label || "Appointments"}</Badge>}
@@ -201,7 +247,7 @@ export function PatientAppointmentsPage() {
                         : "border-line bg-surface-2"
                     }`}
                   >
-                    <Link to={`/patient/appointments/${appointment.id}?bucket=${appointment.journeyBucket}`}>
+                    <Link to={`/patient/appointments/${appointment.id}?bucket=${getBucketQueryFromTab(tabFromBucket)}`}>
                       <div className="flex flex-wrap items-center justify-between gap-3">
                         <div>
                           <p className="text-base font-semibold text-ink">{formatTime(appointment.startAt)} {appointment.doctor?.fullName}</p>
@@ -212,7 +258,7 @@ export function PatientAppointmentsPage() {
                     </Link>
 
                     <div className="mt-3 flex flex-wrap gap-2">
-                      {tabFromBucket === "upcoming" || tabFromBucket === "missed" ? (
+                      {tabFromBucket === "upcoming" || tabFromBucket === "pending-precheck" || tabFromBucket === "missed" ? (
                         <Button asChild variant="secondary" size="sm">
                           <Link to={reschedulePath}>
                             <RotateCcw className="h-4 w-4" />
@@ -220,12 +266,18 @@ export function PatientAppointmentsPage() {
                           </Link>
                         </Button>
                       ) : null}
-                      {tabFromBucket === "upcoming" ? (
+                      {tabFromBucket === "upcoming" || tabFromBucket === "pending-precheck" || tabFromBucket === "precheck-submitted" ? (
                         <Button asChild variant="secondary" size="sm">
                           <a href={mapUrl} target="_blank" rel="noreferrer">
                             <MapPin className="h-4 w-4" />
                             Directions
                           </a>
+                        </Button>
+                      ) : null}
+                      {tabFromBucket === "pending-precheck" ? (
+                        <Button type="button" variant="secondary" size="sm" onClick={() => openPrecheckForAppointment(appointment)}>
+                          <FileText className="h-4 w-4" />
+                          Start pre-check
                         </Button>
                       ) : null}
                       {appointment.canCancel ? (

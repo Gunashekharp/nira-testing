@@ -25,9 +25,9 @@ jobs:
       VITE_APP_BASE_PATH: /Networked-Intelligence-for-Real-time-Ambulatory-Care/
       VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
       VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+      VITE_SUPABASE_STATE_SNAPSHOT_KEY: ${{ vars.VITE_SUPABASE_STATE_SNAPSHOT_KEY }}
       VITE_GUNA_EMR_BASE_URL: ${{ vars.VITE_GUNA_EMR_BASE_URL }}
       VITE_CDSS_BASE_URL: ${{ vars.VITE_CDSS_BASE_URL }}
-      VITE_MONGO_STATE_API_URL: ${{ vars.VITE_MONGO_STATE_API_URL }}
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

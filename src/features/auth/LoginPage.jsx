@@ -12,11 +12,11 @@ import { useTranslation } from "../../hooks/useTranslation";
 const roleCopy = {
   patient: {
     title: "Patient login",
-    description: "Sign in with phone or email to book visits, manage your profile, and continue interviews.",
+    description: "Sign in with phone or email to book visits, manage your profile, and continue pre-checks.",
     postLoginTitle: "After login, you can",
     postLoginItems: [
       { icon: CalendarClock, text: "Book live doctor slots in real time." },
-      { icon: ClipboardList, text: "Track appointment status and interview handoff." },
+      { icon: ClipboardList, text: "Track appointment status and pre-check handoff." },
       { icon: ShieldCheck, text: "View prescription and care updates securely." }
     ]
   },

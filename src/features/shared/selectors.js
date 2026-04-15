@@ -143,10 +143,6 @@ function isMissedPatientAppointment(appointment, encounter, doctor, reference = 
     return false;
   }
 
-  if (!["scheduled", "rescheduled"].includes(appointment.bookingStatus)) {
-    return false;
-  }
-
   if (encounter?.status === "approved") {
     return false;
   }
@@ -202,7 +198,7 @@ function getPatientJourneyLabel(bucket, encounterStatus) {
   return "Upcoming visit";
 }
 
-function getInterviewStatus(appointment, encounter, precheckQuestionnaire) {
+function getInterviewStatus(appointment, encounter, precheckQuestionnaire, interview) {
   if (precheckQuestionnaire?.status === "sent_to_patient") {
     return {
       key: "pending",
@@ -211,19 +207,23 @@ function getInterviewStatus(appointment, encounter, precheckQuestionnaire) {
     };
   }
 
-  if (precheckQuestionnaire?.status === "completed") {
-    return {
-      key: "submitted",
-      label: "Submitted to doctor",
-      description: "Your pre-check is complete and waiting in the doctor workspace."
-    };
-  }
-
   if (encounter?.status === "approved" || appointment.bookingStatus === "completed") {
     return {
       key: "reviewed",
       label: "Reviewed / completed",
       description: "The doctor has already used your pre-check summary and finished the visit."
+    };
+  }
+
+  if (
+    precheckQuestionnaire?.status === "completed"
+    || ["complete", "completed"].includes(String(interview?.completionStatus || "").toLowerCase())
+    || ["ai_ready", "in_consult"].includes(encounter?.status)
+  ) {
+    return {
+      key: "submitted",
+      label: "Submitted to doctor",
+      description: "Your pre-check is complete and waiting in the doctor workspace."
     };
   }
 
@@ -303,7 +303,7 @@ function buildPatientAppointmentItem(state, appointment) {
   const testOrder = testOrderCollection.byId[`tests-${appointment.id}`] || null;
   const hasTests = testOrder && ((testOrder.tests?.length || 0) > 0 || String(testOrder.patientNote || "").trim().length > 0);
   const journeyBucket = getPatientJourneyBucket(appointment, encounter, prescription, doctor);
-  const interviewStatus = getInterviewStatus(appointment, encounter, precheckQuestionnaire);
+  const interviewStatus = getInterviewStatus(appointment, encounter, precheckQuestionnaire, interview);
 
   const appointmentItem = {
     ...appointment,
@@ -373,6 +373,7 @@ export function getPatientWorkspace(state) {
       },
       nextAppointment: null,
       pendingInterview: null,
+      pendingPrecheckAppointments: [],
       prescriptions: [],
       testOrders: [],
       notifications: [],
@@ -418,6 +419,11 @@ export function getPatientWorkspace(state) {
     appointmentsByBucket.completed[0] ||
     null;
   const pendingInterview = appointmentsByBucket.action[0] || null;
+  const pendingPrecheckAppointments = appointments.filter(
+    (appointment) =>
+      appointment.precheckQuestionnaire?.status === "sent_to_patient"
+      && !["completed", "cancelled"].includes(appointment.bookingStatus)
+  );
   const prescriptions = listCollection(state.prescriptions)
     .filter((prescription) => prescription.patientId === patient.id)
     .sort((left, right) => new Date(right.issuedAt) - new Date(left.issuedAt));
@@ -436,10 +442,7 @@ export function getPatientWorkspace(state) {
     .filter((notification) => notification.userId === patient.userId)
     .sort((left, right) => new Date(right.created_at) - new Date(left.created_at));
   const unreadNotificationCount = notifications.filter((notification) => !notification.is_read).length;
-  const pendingPrecheckQuestionnaire = listCollection(state.precheckQuestionnaires)
-    .filter((questionnaire) => questionnaire.patientId === patient.id)
-    .sort((left, right) => new Date(right.updatedAt || right.createdAt) - new Date(left.updatedAt || left.createdAt))
-    .find((questionnaire) => questionnaire.status === "sent_to_patient") || null;
+  const pendingPrecheckQuestionnaire = pendingPrecheckAppointments[0]?.precheckQuestionnaire || null;
   const nextRecommendedAction =
     appointmentsByBucket.action[0]?.nextAction ||
     appointmentsByBucket.review[0]?.nextAction ||
@@ -458,6 +461,7 @@ export function getPatientWorkspace(state) {
     bucketCounts,
     nextAppointment,
     pendingInterview,
+    pendingPrecheckAppointments,
     prescriptions,
     labReports,
     testOrders,
@@ -487,20 +491,37 @@ export function getDoctorWorkspace(state) {
     .filter((appointment) => appointment.doctorId === doctor.id && appointment.bookingStatus !== "cancelled")
     .sort((left, right) => new Date(left.startAt) - new Date(right.startAt))
     .map((appointment) => {
+      const patient = state.patients.byId[appointment.patientId];
+      const interview = state.interviews.byId[`interview-${appointment.id}`];
       const encounter = state.encounters.byId[`encounter-${appointment.id}`];
+      const precheckQuestionnaire = listCollection(state.precheckQuestionnaires).find((item) => item.appointmentId === appointment.id) || null;
       const labReport = listCollection(state.labReports)
         .filter((report) => report.appointmentId === appointment.id)
         .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0] || null;
       const emrSync = state.emrSync?.byId?.[`emr-${appointment.id}`] || null;
       const dbSync = state.dbSync?.byId?.[`db-${appointment.id}`] || null;
+      const chiefComplaint =
+        encounter?.apciDraft?.soap?.chiefComplaint
+        || interview?.extractedFindings?.[0]
+        || Object.values(precheckQuestionnaire?.precheckSummary || {})[0]
+        || appointment.visitType
+        || "";
       return {
         ...appointment,
-        patient: state.patients.byId[appointment.patientId],
-        interview: state.interviews.byId[`interview-${appointment.id}`],
+        appointmentId: appointment.id,
+        appointmentDateTime: appointment.startAt,
+        patient,
+        patientName: patient?.fullName || "",
+        interview,
         encounter,
+        chiefComplaint,
+        abhaId: patient?.abhaNumber || patient?.abha || "",
+        tokenNumber: appointment.token,
+        encounter_fhir_id: emrSync?.encounterId || null,
         labReport,
         emrSync,
         dbSync,
+        precheckQuestionnaire,
         draft: encounter?.apciDraft || null,
         review: encounter?.doctorReview || null,
         queueStatus: encounter?.status || "awaiting_interview"

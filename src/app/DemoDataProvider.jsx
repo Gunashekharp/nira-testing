@@ -109,6 +109,21 @@ export function DemoDataProvider({ children }) {
           setState(snapshot);
           return snapshot;
         },
+        async ensurePrecheckQuestionnaire(appointmentId, options) {
+          const snapshot = await demoStore.ensurePrecheckQuestionnaire(appointmentId, options);
+          setState(snapshot);
+          return snapshot;
+        },
+        async startAdaptivePrecheckSession(appointmentId) {
+          const snapshot = await demoStore.startAdaptivePrecheckSession(appointmentId);
+          setState(snapshot);
+          return snapshot;
+        },
+        async answerAdaptivePrecheckQuestion(appointmentId, payload) {
+          const snapshot = await demoStore.answerAdaptivePrecheckQuestion(appointmentId, payload);
+          setState(snapshot);
+          return snapshot;
+        },
         async submitInterview(appointmentId, payload) {
           const snapshot = await demoStore.submitInterview(appointmentId, payload);
           setState(snapshot);

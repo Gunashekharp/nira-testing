@@ -1,5 +1,9 @@
 import { supabase, supabaseConfigured } from "../lib/supabase";
 
+const appStateSnapshotKey = (import.meta.env.VITE_SUPABASE_STATE_SNAPSHOT_KEY || "").trim();
+
+export const appStateSnapshotConfigured = Boolean(supabaseConfigured && appStateSnapshotKey);
+
 function normalizeDbUserStatus(role) {
   if (role === "doctor") {
     return "pending";
@@ -38,6 +42,65 @@ async function createUserProfile(payload) {
 
   if (error) throw error;
   return data;
+}
+
+function requireSupabaseConfigured() {
+  if (!supabaseConfigured) {
+    throw new Error("Supabase not configured");
+  }
+}
+
+async function invokeCareSync(action, payload = {}) {
+  requireSupabaseConfigured();
+  const { data, error } = await supabase.functions.invoke("care-sync", {
+    body: {
+      action,
+      ...payload
+    }
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function fetchAppStateSnapshot() {
+  if (!appStateSnapshotConfigured) {
+    return null;
+  }
+
+  const payload = await invokeCareSync("get_app_state_snapshot", {
+    snapshotKey: appStateSnapshotKey
+  });
+
+  return payload?.state || null;
+}
+
+export async function persistAppStateSnapshot(state) {
+  if (!appStateSnapshotConfigured) {
+    return {
+      synced: false,
+      skipped: true,
+      reason: supabaseConfigured ? "snapshot_key_not_configured" : "supabase_not_configured"
+    };
+  }
+
+  const payload = await invokeCareSync("upsert_app_state_snapshot", {
+    snapshotKey: appStateSnapshotKey,
+    state
+  });
+
+  return {
+    synced: true,
+    skipped: false,
+    snapshotKey: payload?.snapshotKey || appStateSnapshotKey,
+    updatedAt: payload?.updatedAt || null
+  };
+}
+
+function normalizeInterviewStatus(status = "") {
+  const value = String(status || "").toLowerCase();
+  if (["complete", "completed"].includes(value)) return "completed";
+  if (["abandoned", "cancelled", "closed"].includes(value)) return "abandoned";
+  return value || "in-progress";
 }
 
 export async function syncSignupToDatabase({
@@ -106,24 +169,42 @@ export async function syncSignupToDatabase({
 
 // ── Encounters ──────────────────────────────────────────────
 
-export async function createEncounter({ patientId, doctorId, clinicId, scheduledTime, type, chiefComplaint }) {
-  // Use Edge Function for full EMR integration
-  const { data, error } = await supabase.functions.invoke("booking-to-emr", {
-    body: { patientId, doctorId, clinicId, scheduledTime, type, chiefComplaint },
+export async function createEncounter({
+  patientId,
+  doctorId,
+  clinicId,
+  scheduledTime,
+  type,
+  chiefComplaint,
+  appointmentId,
+  tokenNumber = null,
+  status = "planned",
+  metadata = {}
+}) {
+  return invokeCareSync("upsert_encounter", {
+    patientId,
+    doctorId,
+    clinicId,
+    scheduledTime,
+    type,
+    chiefComplaint,
+    appointmentId,
+    tokenNumber,
+    status,
+    metadata
   });
-  if (error) throw error;
-  return data;
 }
 
-export async function updateEncounterStatus(encounterId, status) {
-  const { data, error } = await supabase
-    .from("encounters")
-    .update({ status })
-    .eq("id", encounterId)
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+export async function upsertEncounterSnapshot(payload) {
+  return invokeCareSync("upsert_encounter", payload);
+}
+
+export async function updateEncounterStatus(encounterId, status, extra = {}) {
+  return invokeCareSync("upsert_encounter", {
+    encounterId,
+    status,
+    ...extra
+  });
 }
 
 export async function getEncounterWithDetails(encounterId) {
@@ -138,22 +219,41 @@ export async function getEncounterWithDetails(encounterId) {
 
 // ── Prescriptions ───────────────────────────────────────────
 
-export async function createPrescription({ encounterId, patientId, doctorId, clinicId, medications, diagnosis, notes }) {
-  const { data, error } = await supabase
-    .from("medication_requests")
-    .insert({ encounter_id: encounterId, patient_id: patientId, doctor_id: doctorId, clinic_id: clinicId, medications, diagnosis, notes })
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+export async function createPrescription({
+  prescriptionId,
+  appointmentId,
+  encounterId,
+  patientId,
+  doctorId,
+  clinicId,
+  medications,
+  diagnosis,
+  notes,
+  status = "draft",
+  approvedAt = null,
+  metadata = {}
+}) {
+  return invokeCareSync("upsert_prescription", {
+    prescriptionId,
+    appointmentId,
+    encounterId,
+    patientId,
+    doctorId,
+    clinicId,
+    medications,
+    diagnosis,
+    notes,
+    status,
+    approvedAt,
+    metadata
+  });
 }
 
 export async function approvePrescription(prescriptionId, doctorId) {
-  const { data, error } = await supabase.functions.invoke("rx-approval", {
-    body: { prescriptionId, action: "approve", doctorId },
+  return invokeCareSync("approve_prescription", {
+    prescriptionId,
+    doctorId
   });
-  if (error) throw error;
-  return data;
 }
 
 // ── Patients ────────────────────────────────────────────────
@@ -180,25 +280,53 @@ export async function upsertPatient(patient) {
 
 // ── Interview Sessions ──────────────────────────────────────
 
-export async function createInterview({ encounterId, patientId, language }) {
-  const { data, error } = await supabase
-    .from("interview_sessions")
-    .insert({ encounter_id: encounterId, patient_id: patientId, language })
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+export async function createInterview({
+  interviewId,
+  appointmentId,
+  encounterId,
+  patientId,
+  language,
+  status = "in-progress",
+  transcript = [],
+  aiSummary = null,
+  completedAt = null,
+  metadata = {}
+}) {
+  return invokeCareSync("upsert_interview", {
+    interviewId,
+    appointmentId,
+    encounterId,
+    patientId,
+    language,
+    status: normalizeInterviewStatus(status),
+    transcript,
+    aiSummary,
+    completedAt,
+    metadata
+  });
 }
 
 export async function updateInterview(interviewId, updates) {
-  const { data, error } = await supabase
-    .from("interview_sessions")
-    .update(updates)
-    .eq("id", interviewId)
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+  const normalizedStatus = normalizeInterviewStatus(
+    updates?.status || updates?.completion_status || updates?.completionStatus
+  );
+  const completedAt =
+    updates?.completed_at
+    || updates?.completedAt
+    || (normalizedStatus === "completed" ? new Date().toISOString() : null);
+
+  return invokeCareSync("upsert_interview", {
+    interviewId,
+    appointmentId: updates?.appointmentId,
+    encounterId: updates?.encounterId,
+    patientId: updates?.patientId,
+    language: updates?.language,
+    status: normalizedStatus,
+    transcript: updates?.transcript,
+    aiSummary: updates?.ai_summary ?? updates?.aiSummary ?? null,
+    completedAt,
+    metadata: updates?.metadata || {}
+  });
 }
 
 // ── User Profiles ───────────────────────────────────────────
@@ -227,21 +355,38 @@ export async function updateUserProfile(userId, updates) {
 
 // ── Pre-Check Questionnaires ────────────────────────────────
 
-export async function createPrecheckQuestionnaire({ encounterId, patientId, doctorId, clinicId, aiQuestions }) {
-  const { data, error } = await supabase
-    .from("pre_check_questionnaires")
-    .insert({
-      encounter_id: encounterId,
-      patient_id: patientId,
-      doctor_id: doctorId,
-      clinic_id: clinicId,
-      ai_questions: aiQuestions,
-      status: "ai_generated"
-    })
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+export async function createPrecheckQuestionnaire({
+  questionnaireId,
+  appointmentId,
+  encounterId,
+  patientId,
+  doctorId,
+  clinicId,
+  aiQuestions,
+  editedQuestions = [],
+  patientResponses = {},
+  status = "ai_generated",
+  doctorConfirmedAt = null,
+  sentToPatientAt = null,
+  patientCompletedAt = null,
+  metadata = {}
+}) {
+  return invokeCareSync("upsert_precheck", {
+    questionnaireId,
+    appointmentId,
+    encounterId,
+    patientId,
+    doctorId,
+    clinicId,
+    aiQuestions,
+    editedQuestions,
+    patientResponses,
+    status,
+    doctorConfirmedAt,
+    sentToPatientAt,
+    patientCompletedAt,
+    metadata
+  });
 }
 
 export async function getPrecheckQuestionnaire(questionnaireId) {
@@ -265,67 +410,117 @@ export async function getPrecheckByEncounter(encounterId) {
 }
 
 export async function updatePrecheckQuestions(questionnaireId, editedQuestions) {
-  const { data, error } = await supabase
-    .from("pre_check_questionnaires")
-    .update({
-      edited_questions: editedQuestions,
-      status: "doctor_editing"
-    })
-    .eq("id", questionnaireId)
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+  return invokeCareSync("upsert_precheck", {
+    questionnaireId,
+    editedQuestions,
+    status: "doctor_editing"
+  });
 }
 
 export async function confirmPrecheckQuestions(questionnaireId) {
-  const { data, error } = await supabase
-    .from("pre_check_questionnaires")
-    .update({
-      status: "sent_to_patient",
-      doctor_confirmed_at: new Date().toISOString(),
-      sent_to_patient_at: new Date().toISOString()
-    })
-    .eq("id", questionnaireId)
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+  return invokeCareSync("upsert_precheck", {
+    questionnaireId,
+    status: "sent_to_patient",
+    doctorConfirmedAt: new Date().toISOString(),
+    sentToPatientAt: new Date().toISOString()
+  });
 }
 
 export async function submitPrecheckResponses(questionnaireId, patientResponses) {
-  const { data, error } = await supabase
-    .from("pre_check_questionnaires")
-    .update({
-      patient_responses: patientResponses,
-      status: "completed",
-      patient_completed_at: new Date().toISOString()
-    })
-    .eq("id", questionnaireId)
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+  return invokeCareSync("upsert_precheck", {
+    questionnaireId,
+    patientResponses,
+    status: "completed",
+    patientCompletedAt: new Date().toISOString()
+  });
 }
 
 // ── Notifications ───────────────────────────────────────────
 
-export async function createNotification({ userId, type, title, message, encounterId, questionnaireId, prescriptionId }) {
-  const { data, error } = await supabase
-    .from("notifications")
-    .insert({
-      user_id: userId,
-      type,
-      title,
-      message,
-      encounter_id: encounterId,
-      questionnaire_id: questionnaireId,
-      prescription_id: prescriptionId
-    })
-    .select()
-    .single();
-  if (error) throw error;
-  return data;
+export async function createNotification({
+  notificationId,
+  userId,
+  type,
+  title,
+  message,
+  encounterId,
+  questionnaireId,
+  prescriptionId,
+  appointmentId = null,
+  metadata = {}
+}) {
+  return invokeCareSync("upsert_notification", {
+    notificationId,
+    userId,
+    type,
+    title,
+    message,
+    encounterId,
+    questionnaireId,
+    prescriptionId,
+    appointmentId,
+    metadata
+  });
+}
+
+export async function upsertLabReport({
+  reportId,
+  appointmentId,
+  encounterId,
+  patientId,
+  doctorId,
+  clinicId,
+  title,
+  category,
+  findings,
+  resultSummary,
+  status = "draft",
+  metadata = {}
+}) {
+  return invokeCareSync("upsert_lab_report", {
+    reportId,
+    appointmentId,
+    encounterId,
+    patientId,
+    doctorId,
+    clinicId,
+    title,
+    category,
+    findings,
+    resultSummary,
+    status,
+    metadata
+  });
+}
+
+export async function upsertTestOrder({
+  orderId,
+  appointmentId,
+  encounterId,
+  patientId,
+  doctorId,
+  clinicId,
+  doctorName,
+  tests,
+  patientNote,
+  status = "ordered",
+  orderedAt = null,
+  metadata = {}
+}) {
+  return invokeCareSync("upsert_test_order", {
+    orderId,
+    appointmentId,
+    encounterId,
+    patientId,
+    doctorId,
+    clinicId,
+    doctorName,
+    tests,
+    patientNote,
+    status,
+    orderedAt,
+    metadata
+  });
 }
 
 export async function getUserNotifications(userId) {

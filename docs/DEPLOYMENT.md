@@ -6,16 +6,16 @@ Use the current frontend as a static app for previews, and keep the final produc
 
 - `Vercel`: best choice for quick previews and stakeholder reviews
 - `GitHub Pages`: acceptable for static demo builds
-- `AWS` or `Google Cloud` VM: best final option when you need the local Mongo state API, backend services, or full control over networking
+- `AWS` or `Google Cloud` VM: best final option when you need backend services or full control over networking
 
 ## Important limitation
 
-The frontend can run entirely on demo data, but `server/mongo-state-api.mjs` is a Node process. Static hosts do not run that process for you.
+The frontend can run entirely on demo data with localStorage only, or it can mirror the full demo-store snapshot through Supabase when `VITE_SUPABASE_STATE_SNAPSHOT_KEY` is configured.
 
 That means:
 
 - `Vercel` and `GitHub Pages` work well for the current dummy-data workflow
-- Mongo-backed runtime persistence should move to a real backend or VM-hosted service before final production
+- Supabase-backed snapshot persistence works on static hosts as long as the Supabase frontend vars are set
 
 ## Vercel deployment
 
@@ -28,9 +28,9 @@ Steps:
 3. Add any frontend environment variables you need:
    - `VITE_SUPABASE_URL`
    - `VITE_SUPABASE_ANON_KEY`
-   - `VITE_GUNA_EMR_BASE_URL`
-   - `VITE_CDSS_BASE_URL`
-   - `VITE_MONGO_STATE_API_URL` only if that API is hosted elsewhere
+   - `VITE_SUPABASE_STATE_SNAPSHOT_KEY` if you want remote demo-state persistence
+   - `VITE_GUNA_EMR_BASE_URL` if EMR APIs live on a different origin
+   - `VITE_CDSS_BASE_URL` if CDSS APIs live on a different origin
 4. Deploy.
 
 Vercel will run the root build and serve the SPA with route rewrites enabled.
@@ -50,7 +50,7 @@ Notes:
 
 - The workflow is configured for the repository name `Networked-Intelligence-for-Real-time-Ambulatory-Care`.
 - If the repository name changes, update `VITE_APP_BASE_PATH` inside `.github/workflows/frontend-pages.yml`.
-- GitHub Pages is for static demos only. It should not be the final host for Mongo-backed runtime features.
+- GitHub Pages is for static demos only. It can still use Supabase-backed snapshot persistence when the necessary vars are configured.
 
 ## VM deployment
 
@@ -65,10 +65,24 @@ This repository already includes:
 
 Suggested VM flow:
 
-1. Build the frontend image or run `npm ci && npm run build`.
-2. Serve the built `dist` folder through Nginx.
-3. Run the Mongo state API as a separate Node service if you still need it.
-4. Point `VITE_GUNA_EMR_BASE_URL`, `VITE_CDSS_BASE_URL`, and `VITE_MONGO_STATE_API_URL` to real service URLs.
+1. Build the container image or run `npm ci && npm run build`.
+2. Run Nginx together with the bundled converter-agent. This repo now proxies:
+   - `/api/*` -> local converter-agent on port `3001`
+   - `/cdss/*` -> local converter-agent on port `3001`
+3. Point `VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, and `VITE_SUPABASE_STATE_SNAPSHOT_KEY` to your real Supabase project.
+4. Leave `VITE_GUNA_EMR_BASE_URL` and `VITE_CDSS_BASE_URL` empty if you want same-origin proxying through Nginx, or set them only when those services live on a different HTTPS origin.
+
+This same-origin proxy path avoids mixed-protocol errors such as sending `http://` requests to an HTTPS-only Nginx port.
+
+## Supabase edge function
+
+If you want full Supabase sync instead of local-only fallback, also deploy the `care-sync` edge function before using production workflows that persist encounters, prescriptions, interviews, or snapshots.
+
+Typical command:
+
+```powershell
+supabase functions deploy care-sync
+```
 
 ## Pre-deploy check
 

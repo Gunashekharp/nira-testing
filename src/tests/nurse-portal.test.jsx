@@ -13,12 +13,14 @@ test("loads the nurse portal with the core workflow screens", async () => {
   await user.click(screen.getByRole("button", { name: /^login$/i }));
 
   expect(await screen.findByText("Nurse command center")).toBeInTheDocument();
-  expect(screen.getByText("Today's ward picture")).toBeInTheDocument();
-  expect(screen.getByText("Scan, capture, and save in under 30 seconds")).toBeInTheDocument();
-  expect(screen.getByText("Barcode + 5-rights confirmation")).toBeInTheDocument();
-  expect(screen.getByText("My patients, ward view, and critical filter")).toBeInTheDocument();
-  expect(screen.getByText("Checklist with timestamps and escalation")).toBeInTheDocument();
-  expect(screen.getByText("Critical first, then medium, then routine")).toBeInTheDocument();
-  expect(screen.getByText("Flowsheets, notes, photos, and templates")).toBeInTheDocument();
-  expect(screen.getByText("Orders, SBAR, team chat, and call light")).toBeInTheDocument();
+  expect(screen.getByText("Patients booked from portal")).toBeInTheDocument();
+  expect(screen.getByText("Enter and save to EMR")).toBeInTheDocument();
+  expect(screen.getByText("How this nurse screen now works")).toBeInTheDocument();
+  expect(screen.getByText("Filter by status")).toBeInTheDocument();
+  expect(screen.getByText("All dates")).toBeInTheDocument();
+  expect(screen.getByText("Today")).toBeInTheDocument();
+  expect(screen.getByLabelText("Calendar day")).toBeInTheDocument();
+  expect(screen.getByText(/Virtualized list enabled/i)).toBeInTheDocument();
+  expect(screen.queryByText("Today's ward picture")).not.toBeInTheDocument();
+  expect(screen.queryByText("My patients, ward view, and critical filter")).not.toBeInTheDocument();
 });

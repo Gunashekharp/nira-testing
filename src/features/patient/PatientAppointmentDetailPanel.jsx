@@ -40,7 +40,9 @@ function getJourneyTone(bucket) {
 }
 
 function buildTimeline(appointment) {
-  const precheckDone = appointment.precheckQuestionnaire?.status === "completed";
+  const precheckDone =
+    appointment.precheckQuestionnaire?.status === "completed"
+    || ["complete", "completed"].includes(String(appointment.interview?.completionStatus || "").toLowerCase());
   const reviewStarted = ["ai_ready", "in_consult", "approved"].includes(appointment.encounterStatus) || appointment.encounterStatus === "review";
   const prescriptionReady = appointment.canViewPrescription;
 
@@ -51,14 +53,14 @@ function buildTimeline(appointment) {
       active: true
     },
     {
-      label: "Chat intake",
-      description: precheckDone ? "Your chat answers are submitted and visible to doctor." : "Please complete pending chat questions.",
+      label: "Pre-check",
+      description: precheckDone ? "Your pre-check answers are submitted and visible to doctor." : "Please complete the pending pre-check questions.",
       active: precheckDone,
       current: appointment.precheckQuestionnaire?.status === "sent_to_patient" || appointment.encounterStatus === "awaiting_interview"
     },
     {
       label: "Doctor review",
-      description: reviewStarted ? "Doctor is reviewing or has reviewed the summary." : "Doctor review starts after chat intake.",
+      description: reviewStarted ? "Doctor is reviewing or has reviewed the summary." : "Doctor review starts after the pre-check is submitted.",
       active: reviewStarted,
       current: ["ai_ready", "in_consult"].includes(appointment.encounterStatus)
     },
@@ -313,9 +315,9 @@ export function PatientAppointmentDetailPanel({
           />
           <div className="rounded-xl border border-line bg-surface-2 p-4 text-sm leading-6 text-muted">
             {appointment.journeyBucket === "action"
-              ? "Please continue in chatbot to complete the pending care questions before doctor review starts."
+              ? "Please complete the pending pre-check before doctor review starts."
               : appointment.journeyBucket === "review"
-                ? "Your chat intake details are already shared. The doctor is now reviewing or validating the information before final approval."
+                ? "Your pre-check details are already shared. The doctor is now reviewing or validating the information before final approval."
                 : appointment.journeyBucket === "completed"
                   ? "This visit has been completed and the approved prescription is available in your portal."
                   : appointment.journeyBucket === "missed"

@@ -26,19 +26,47 @@ import { formatDate, formatTime } from "../../lib/format";
 import { getTodayDayKey } from "../../lib/schedule";
 import { useTranslation } from "../../hooks/useTranslation";
 
+const PRECHECK_FOCUS_PLACEHOLDER_PATTERNS = [
+  /\bpending symptom interview\b/i,
+  /\bawaiting symptom interview\b/i,
+  /\bchatbot symptom intake\b/i,
+  /\bgeneral consultation\b/i,
+  /\bclinical review\b/i,
+  /^\s*(booked|visit|appointment)\s*$/i
+];
+
+function sanitizePrecheckFocus(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  return PRECHECK_FOCUS_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(normalized))
+    ? ""
+    : normalized;
+}
+
+function getPrecheckFocusLabel(appointment) {
+  return (
+    sanitizePrecheckFocus(appointment?.precheckQuestionnaire?.metadata?.chiefComplaint) ||
+    sanitizePrecheckFocus(appointment?.encounter?.apciDraft?.soap?.chiefComplaint) ||
+    sanitizePrecheckFocus(appointment?.interview?.extractedFindings?.[0]) ||
+    appointment?.doctor?.specialty ||
+    "Pre-visit questions"
+  );
+}
+
 export function PatientHomePage() {
   const { state } = useDemoData();
   const { t } = useTranslation();
   const {
     patient,
     appointments,
-    appointmentsByBucket,
     bucketCounts,
     prescriptions,
     testOrders,
     unreadNotificationCount,
-    nextAppointment,
-    pendingPrecheckQuestionnaire
+    pendingPrecheckAppointments
   } = getPatientWorkspace(state);
   const today = getTodayDayKey();
   const todayAppointments = useMemo(
@@ -144,16 +172,19 @@ export function PatientHomePage() {
   );
 
   const hasRecentVitals = vitalsCards.some((item) => item.live);
-  const showPrecheck = nextAppointment && !["completed", "cancelled"].includes(nextAppointment.journeyBucket);
+  function openPrecheckChat(precheckAppointment) {
+    if (!precheckAppointment) {
+      return;
+    }
 
-  function openPrecheckChat() {
     window.dispatchEvent(new CustomEvent("nira:open-precheck", {
       detail: {
-        appointmentId: nextAppointment?.id,
-        doctorName: nextAppointment?.doctor?.fullName,
-        specialty: nextAppointment?.doctor?.specialty,
-        startAt: nextAppointment?.startAt,
-        hasDoctorQuestions: pendingPrecheckQuestionnaire?.status === "sent_to_patient"
+        appointmentId: precheckAppointment.id,
+        doctorName: precheckAppointment.doctor?.fullName,
+        specialty: precheckAppointment.doctor?.specialty,
+        startAt: precheckAppointment.startAt,
+        hasDoctorQuestions: true,
+        launchSource: "patient_dashboard"
       }
     }));
   }
@@ -193,7 +224,7 @@ export function PatientHomePage() {
           </div>
         </Card>
 
-        {showPrecheck && (
+        {pendingPrecheckAppointments.length > 0 && (
           <motion.div
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
@@ -204,43 +235,78 @@ export function PatientHomePage() {
               <div className="absolute -left-6 bottom-0 h-20 w-20 rounded-full bg-brand-mint/10 blur-xl" />
 
               <div className="relative">
-                <div className="flex items-start gap-4">
-                  <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-tide to-brand-sky shadow-lg shadow-brand-sky/25">
-                    <Stethoscope className="h-6 w-6 text-white" />
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-4">
+                    <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-tide to-brand-sky shadow-lg shadow-brand-sky/25">
+                      <Stethoscope className="h-6 w-6 text-white" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-tide">Pre-Appointment Checks</p>
+                      <h3 className="mt-1 text-lg font-semibold text-ink">Prepare each visit separately</h3>
+                      <p className="mt-1.5 text-sm leading-relaxed text-muted">
+                        Every appointment keeps its own doctor-specific pre-check, so each doctor gets the right problem summary before the visit.
+                      </p>
+                    </div>
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[11px] font-bold uppercase tracking-[0.24em] text-brand-tide">Pre-Appointment Check</p>
-                    <h3 className="mt-1 text-lg font-semibold text-ink">Prepare for your visit</h3>
-                    <p className="mt-1.5 text-sm leading-relaxed text-muted">
-                      Answer a few quick questions before your appointment with{" "}
-                      <span className="font-semibold text-ink">{nextAppointment.doctor?.fullName || "your doctor"}</span>
-                      {nextAppointment.startAt && (
-                        <> on <span className="font-semibold text-ink">{formatDate(nextAppointment.startAt)}</span> at <span className="font-semibold text-ink">{formatTime(nextAppointment.startAt)}</span></>
-                      )}
-                      . This helps your doctor review your case beforehand.
-                    </p>
-                  </div>
+                  <Badge tone="warning">
+                    {pendingPrecheckAppointments.length} pending
+                  </Badge>
                 </div>
 
-                <div className="mt-5 flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={openPrecheckChat}
-                    className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-brand-tide to-brand-sky px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-brand-sky/25 transition-all hover:shadow-xl hover:shadow-brand-sky/30 hover:-translate-y-0.5 active:translate-y-0"
-                  >
-                    <Sparkles className="h-4 w-4" />
-                    Start Pre-Check
-                    <ChevronRight className="h-4 w-4" />
-                  </button>
-                  <span className="text-xs text-muted">Takes ~2 minutes</span>
+                <div className="mt-5 space-y-3">
+                  {pendingPrecheckAppointments.map((precheckAppointment) => {
+                    const focusLabel = getPrecheckFocusLabel(precheckAppointment);
+
+                    return (
+                      <div
+                        key={precheckAppointment.id}
+                        className="rounded-2xl border border-brand-sky/15 bg-white/90 p-4 shadow-sm ring-1 ring-black/[0.03]"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-semibold text-ink">
+                              {precheckAppointment.doctor?.fullName || "Assigned doctor"}
+                            </div>
+                            <div className="mt-1 text-xs text-muted">
+                              {precheckAppointment.startAt ? `${formatDate(precheckAppointment.startAt)} at ${formatTime(precheckAppointment.startAt)}` : "Scheduled soon"}
+                              {" · "}
+                              {precheckAppointment.doctor?.specialty || "General Practice"}
+                            </div>
+                          </div>
+                          <Badge tone="warning">Pending</Badge>
+                        </div>
+
+                        <div className="mt-4 rounded-xl border border-brand-mint/40 bg-brand-mint/10 px-3 py-2.5">
+                          <div className="text-[10px] font-bold uppercase tracking-[0.2em] text-brand-tide">Pre-check focus</div>
+                          <div className="mt-1 text-sm font-medium text-ink">{focusLabel}</div>
+                        </div>
+
+                        <div className="mt-4 flex flex-wrap items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => openPrecheckChat(precheckAppointment)}
+                            aria-label={`Start pre-check for ${precheckAppointment.doctor?.fullName || "your doctor"} about ${focusLabel}`}
+                            className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-brand-tide to-brand-sky px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-brand-sky/25 transition-all hover:shadow-xl hover:shadow-brand-sky/30 hover:-translate-y-0.5 active:translate-y-0"
+                          >
+                            <Sparkles className="h-4 w-4" />
+                            Start Pre-Check
+                            <ChevronRight className="h-4 w-4" />
+                          </button>
+                          <span className="text-xs text-muted">Takes ~2 minutes</span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
 
-                {pendingPrecheckQuestionnaire?.status === "sent_to_patient" && (
-                  <div className="mt-3 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
-                    <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
-                    <span className="text-xs font-medium text-amber-800">Your doctor has sent pre-check questions</span>
-                  </div>
-                )}
+                <div className="mt-3 flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2">
+                  <span className="h-2 w-2 rounded-full bg-amber-500 animate-pulse" />
+                  <span className="text-xs font-medium text-amber-800">
+                    {pendingPrecheckAppointments.length === 1
+                      ? "Your doctor has sent pre-check questions for this appointment."
+                      : `Your doctors have sent pre-check questions for ${pendingPrecheckAppointments.length} appointments.`}
+                  </span>
+                </div>
               </div>
             </Card>
           </motion.div>
@@ -535,10 +601,6 @@ export function PatientHomePage() {
           </div>
         </Card>
 
-        <Link to="/patient/appointments" className="patient-help-bubble" aria-label="Need help?">
-          <MessageCircle className="h-4 w-4" />
-          Need help?
-        </Link>
       </div>
     </AppShell>
   );

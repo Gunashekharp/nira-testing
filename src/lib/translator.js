@@ -166,7 +166,7 @@ export const translations = {
     nurseLogin: 'Nurse login',
     adminLogin: 'Admin login',
     bookLiveSlots: 'Book live doctor slots in real time.',
-    trackAppts: 'Track appointment status and interview handoff.',
+    trackAppts: 'Track appointment status and pre-check handoff.',
     viewPrescriptions: 'View prescription and care updates securely.',
     afterLogin: 'After login, you can',
     premiumNursePortal: 'Premium nurse portal includes',

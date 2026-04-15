@@ -4,21 +4,28 @@ import { clone, uid, wait } from "../lib/utils";
 import { getTodayDayKey } from "../lib/schedule";
 import {
   analyzeCdssEncounter,
-  generateCdssPrecheck,
   syncBookingToGunaEmr,
   syncDoctorApprovalToGunaEmr,
   syncInterviewToGunaEmr,
+  syncNurseVitalsToGunaEmr,
   syncPatientAbhaToGunaEmr
 } from "./gunaEmrBridge";
 import {
+  appStateSnapshotConfigured,
   approvePrescription,
+  createNotification as createDbNotification,
   createEncounter,
   createInterview,
+  createPrecheckQuestionnaire as upsertDbPrecheckQuestionnaire,
   createPrescription,
+  fetchAppStateSnapshot,
+  persistAppStateSnapshot,
   syncSignupToDatabase,
-  updateInterview
+  updateInterview,
+  upsertEncounterSnapshot,
+  upsertLabReport as upsertDbLabReport,
+  upsertTestOrder as upsertDbTestOrder
 } from "./supabaseApi";
-import { fetchMongoState, mongoStateConfigured, persistMongoState } from "./mongoStateApi";
 import { formatDate, formatTime } from "../lib/format";
 import {
   buildOverrideId,
@@ -30,44 +37,56 @@ import {
   syncDoctorDaySchedules,
   upsertEntity
 } from "./stateHelpers";
-import { generatePrecheckQuestions } from "./precheckQuestions";
+import { generateAdaptivePrecheckTurn, generatePrecheckQuestions } from "./precheckQuestions";
 
 export const STORAGE_KEY = "nira-demo-state-v2";
 const APPOINTMENT_REMINDER_WINDOW_MS = 2 * 60 * 60 * 1000;
-let mongoStateHydrated = false;
-let mongoPersistQueue = Promise.resolve();
+const DISEASE_SPECIFIC_PRECHECK_MODE = "adaptive_disease_specific_ai";
+const DISEASE_SPECIFIC_PRECHECK_VERSION = "adaptive-symptom-ai-v2";
+const PRECHECK_PRIMARY_CONCERN_PATTERNS = [
+  /\bwhat health problem, symptom, or concern would you like help with today\??$/i,
+  /\bwhat symptoms are bothering you most right now\??$/i,
+  /\bwhat is your main concern right now\??$/i,
+  /\bwhat is your main concern for this appointment\??$/i,
+  /\bwhat(?:'s| is) bothering you\b/i,
+];
+const DISEASE_SPECIFIC_PRECHECK_MIN_QUESTIONS = 7;
+const DISEASE_SPECIFIC_PRECHECK_MAX_QUESTIONS = 9;
+const DISEASE_SPECIFIC_PRECHECK_DEFAULT_TARGET = 8;
+let appStateSnapshotHydrated = false;
+let appStateSnapshotPersistQueue = Promise.resolve();
 
-function queueMongoStatePersist(snapshot) {
-  if (!mongoStateConfigured || typeof window === "undefined") {
+function queueAppStateSnapshotPersist(snapshot) {
+  if (!appStateSnapshotConfigured || typeof window === "undefined") {
     return;
   }
 
-  mongoPersistQueue = mongoPersistQueue
-    .then(() => persistMongoState(snapshot))
+  appStateSnapshotPersistQueue = appStateSnapshotPersistQueue
+    .then(() => persistAppStateSnapshot(snapshot))
     .catch((error) => {
-      console.warn("[NIRA] Mongo state persistence skipped.", error);
+      console.warn("[NIRA] Supabase state snapshot persistence skipped.", error);
     });
 }
 
-async function hydrateStateFromMongo() {
-  if (!mongoStateConfigured || typeof window === "undefined" || mongoStateHydrated) {
+async function hydrateStateFromSnapshot() {
+  if (!appStateSnapshotConfigured || typeof window === "undefined" || appStateSnapshotHydrated) {
     return;
   }
 
-  mongoStateHydrated = true;
+  appStateSnapshotHydrated = true;
 
   try {
-    const remoteState = await fetchMongoState();
+    const remoteState = await fetchAppStateSnapshot();
 
     if (!remoteState) {
-      queueMongoStatePersist(readRaw());
+      queueAppStateSnapshotPersist(readRaw());
       return;
     }
 
     normalizeStateShape(remoteState);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(remoteState));
   } catch (error) {
-    console.warn("[NIRA] Failed to hydrate state from Mongo.", error);
+    console.warn("[NIRA] Failed to hydrate state from Supabase snapshot.", error);
   }
 }
 
@@ -191,7 +210,7 @@ function writeRaw(nextState) {
   if (typeof window !== "undefined") {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     window.dispatchEvent(new CustomEvent("nira-demo-state-updated"));
-    queueMongoStatePersist(payload);
+    queueAppStateSnapshotPersist(payload);
   }
   return payload;
 }
@@ -560,15 +579,134 @@ function extractClinicalLists(state, appointment, patient) {
   };
 }
 
+const PRECHECK_CONTEXT_PLACEHOLDER_PATTERNS = [
+  /\bpending symptom interview\b/i,
+  /\bawaiting symptom interview\b/i,
+  /\bchatbot symptom intake\b/i,
+  /\bgeneral consultation\b/i,
+  /\bclinical review\b/i,
+  /^\s*(booked|visit|appointment)\s*$/i
+];
+
+function sanitizePrecheckContextValue(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  return PRECHECK_CONTEXT_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(normalized))
+    ? ""
+    : normalized;
+}
+
+function sanitizePrecheckContextList(values) {
+  return dedupeList(
+    (Array.isArray(values) ? values : [])
+      .map((value) => sanitizePrecheckContextValue(value))
+      .filter(Boolean)
+  );
+}
+
+function buildDiseaseSpecificPrecheckMetadata(questions = [], existingMetadata = {}, overrides = {}) {
+  return {
+    ...(existingMetadata || {}),
+    generationMode: DISEASE_SPECIFIC_PRECHECK_MODE,
+    generationVersion: DISEASE_SPECIFIC_PRECHECK_VERSION,
+    questionCount: Array.isArray(questions) ? questions.length : 0,
+    targetQuestionCount: Number.isFinite(Number(overrides?.targetQuestionCount ?? existingMetadata?.targetQuestionCount))
+      ? Math.min(
+          DISEASE_SPECIFIC_PRECHECK_MAX_QUESTIONS,
+          Math.max(
+            DISEASE_SPECIFIC_PRECHECK_MIN_QUESTIONS,
+            Math.round(Number(overrides?.targetQuestionCount ?? existingMetadata?.targetQuestionCount))
+          )
+        )
+      : DISEASE_SPECIFIC_PRECHECK_DEFAULT_TARGET,
+    adaptiveComplete: Boolean(overrides?.adaptiveComplete ?? existingMetadata?.adaptiveComplete),
+    chiefComplaint: String(overrides?.chiefComplaint ?? existingMetadata?.chiefComplaint ?? "").trim(),
+    diseaseSpecific: true,
+    adaptive: true
+  };
+}
+
+function shouldRefreshDiseaseSpecificPrecheck(questionnaire) {
+  if (!questionnaire) {
+    return true;
+  }
+
+  if (Array.isArray(questionnaire?.editedQuestions) && questionnaire.editedQuestions.length > 0) {
+    return false;
+  }
+
+  const questions = Array.isArray(questionnaire?.aiQuestions) ? questionnaire.aiQuestions : [];
+  const metadata = questionnaire?.metadata || {};
+
+  if (!questions.length && !metadata.adaptive) {
+    return true;
+  }
+
+  if (shouldRefreshMissingComplaintPrecheck(questionnaire)) {
+    return true;
+  }
+
+  return !(
+    metadata.generationMode === DISEASE_SPECIFIC_PRECHECK_MODE
+    && metadata.generationVersion === DISEASE_SPECIFIC_PRECHECK_VERSION
+  );
+}
+
+function shouldRefreshMissingComplaintPrecheck(questionnaire) {
+  const firstQuestion = String(questionnaire?.aiQuestions?.[0]?.question || "").trim();
+  if (!firstQuestion) {
+    return false;
+  }
+
+  if (countAnsweredPrecheckResponses(questionnaire) > 0) {
+    return false;
+  }
+
+  const chiefComplaint = sanitizePrecheckContextValue(questionnaire?.metadata?.chiefComplaint || "");
+  if (chiefComplaint) {
+    return false;
+  }
+
+  return !PRECHECK_PRIMARY_CONCERN_PATTERNS.some((pattern) => pattern.test(firstQuestion));
+}
+
+function shouldUseAdaptivePrecheck(questionnaire) {
+  return !Array.isArray(questionnaire?.editedQuestions) || questionnaire.editedQuestions.length === 0;
+}
+
+function countAnsweredPrecheckResponses(questionnaire) {
+  const responses = questionnaire?.patientResponses || {};
+  return Object.values(responses).filter((value) => String(value || "").trim()).length;
+}
+
+function getAdaptivePrecheckTargetQuestionCount(questionnaire) {
+  return buildDiseaseSpecificPrecheckMetadata([], questionnaire?.metadata || {}).targetQuestionCount;
+}
+
+function getCurrentAdaptivePrecheckQuestion(questionnaire) {
+  const questions = Array.isArray(questionnaire?.aiQuestions) ? questionnaire.aiQuestions : [];
+  const answeredCount = countAnsweredPrecheckResponses(questionnaire);
+  return questions[answeredCount] || null;
+}
+
+function buildAdaptivePrecheckContext(snapshot, appointment, patient, doctor, questionnaire) {
+  const baseContext = buildAiPrecheckContextForAppointment(snapshot, appointment, patient, doctor);
+  return {
+    ...baseContext,
+    chiefComplaint: baseContext.chiefComplaint || String(questionnaire?.metadata?.chiefComplaint || "").trim(),
+  };
+}
+
 function inferProfileSignals(state, appointment, patient, doctor) {
   const specialty = String(doctor?.specialty || "general").toLowerCase();
   const encounter = state.encounters.byId[`encounter-${appointment.id}`] || null;
   const interview = state.interviews.byId[`interview-${appointment.id}`] || null;
   const visitType = String(appointment?.visitType || "visit").toLowerCase();
   const patientNotes = String(patient?.notes || "").toLowerCase();
-  const chiefComplaint = String(
-    encounter?.apciDraft?.soap?.chiefComplaint || interview?.extractedFindings?.[0] || appointment?.visitType || "general consultation"
-  ).trim();
+  const chiefComplaint = sanitizePrecheckContextValue(encounter?.apciDraft?.soap?.chiefComplaint || "");
 
   const profileBlob = [
     specialty,
@@ -604,208 +742,77 @@ function inferProfileSignals(state, appointment, patient, doctor) {
   };
 }
 
-function buildPrecheckQuestionsForAppointment(state, appointment, patient, doctor) {
+function normalizePrecheckQuestionsForStorage(questions, appointmentId) {
+  const seen = new Set();
+
+  return (Array.isArray(questions) ? questions : [])
+    .map((question, index) => ({
+      id: question?.id || `precheck-${appointmentId}-${index + 1}`,
+      question: String(question?.question || question?.text || "").trim(),
+      type: String(question?.type || "text").toLowerCase(),
+      options: Array.isArray(question?.options) ? question.options.filter(Boolean) : [],
+      required: question?.required !== false,
+      category: String(question?.category || "ai_precheck").trim() || "ai_precheck",
+      rationale: String(question?.rationale || "").trim(),
+      confidence: Number(question?.confidence || 0)
+    }))
+    .filter((question) => {
+      const key = question.question.toLowerCase();
+      if (!key || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+}
+
+function buildAiPrecheckContextForAppointment(state, appointment, patient, doctor) {
+  const encounter = state.encounters.byId[`encounter-${appointment.id}`] || null;
+  const interview = state.interviews.byId[`interview-${appointment.id}`] || null;
   const signals = inferProfileSignals(state, appointment, patient, doctor);
-  const questions = [];
+  const latestSymptoms = sanitizePrecheckContextList([
+    ...(encounter?.apciDraft?.soap?.chiefComplaint ? [encounter.apciDraft.soap.chiefComplaint] : []),
+    ...(encounter?.apciDraft?.soap?.subjective ? splitListText(encounter.apciDraft.soap.subjective) : []),
+    ...(encounter?.interviewSummary ? splitListText(encounter.interviewSummary) : []),
+    ...(interview?.extractedFindings || []),
+    ...(signals.chiefComplaint ? [signals.chiefComplaint] : [])
+  ]).slice(0, 8);
+  const transcriptContext = sanitizePrecheckContextList([
+    ...(encounter?.apciDraft?.soap?.subjective ? splitListText(encounter.apciDraft.soap.subjective) : []),
+    ...(encounter?.apciDraft?.soap?.assessment ? splitListText(encounter.apciDraft.soap.assessment) : []),
+    ...(encounter?.interviewSummary ? splitListText(encounter.interviewSummary) : []),
+    ...((interview?.transcript || []).map((entry) => String(entry?.text || "").trim()).filter(Boolean)),
+    ...(patient?.notes ? splitListText(patient.notes) : [])
+  ]).slice(0, 12);
+  const patientNotes = sanitizePrecheckContextValue(patient?.notes || "");
 
-  function addQuestion(payload) {
-    const normalized = String(payload.question || "").trim().toLowerCase();
-    if (!normalized) return;
-    if (questions.some((item) => String(item.question || "").trim().toLowerCase() === normalized)) {
-      return;
-    }
-    questions.push(payload);
-  }
-
-  addQuestion({
-    question: `What is your main concern right now${signals.chiefComplaint ? ` (currently noted: ${signals.chiefComplaint})` : ""}?`,
-    type: "text",
-    required: true,
-    category: "symptoms"
-  });
-
-  if (signals.knownConditions?.length) {
-    addQuestion({
-      question: `Do your current symptoms feel related to any known condition (${signals.knownConditions.join(", ")})? If yes, how?`,
-      type: "text",
-      required: true,
-      category: "history"
-    });
-  }
-
-  addQuestion({
-    question: "When did this start, and is it getting better, worse, or unchanged?",
-    type: "text",
-    required: true,
-    category: "timeline"
-  });
-
-  addQuestion({
-    question: "How severe is your main symptom right now on a scale of 1 (mild) to 10 (worst)?",
-    type: "rating",
-    required: true,
-    category: "severity"
-  });
-
-  addQuestion({
-    question: "Do you currently have urgent warning signs such as severe breathlessness, chest pain at rest, confusion, fainting, or uncontrolled bleeding?",
-    type: "yesno",
-    required: true,
-    category: "red_flags"
-  });
-
-  addQuestion({
-    question: signals.knownMedications?.length
-      ? `We already have these medicines on file: ${signals.knownMedications.join(", ")}. Are you still taking them, and have you started anything new?`
-      : "What medicines, supplements, or home remedies are you currently taking?",
-    type: "text",
-    required: true,
-    category: "medications"
-  });
-
-  addQuestion({
-    question: signals.knownAllergies?.length
-      ? `Previously noted allergy/reaction history: ${signals.knownAllergies.join(", ")}. Is this correct, and any new reactions?`
-      : "Any known allergies or past bad reactions to medicines?",
-    type: "text",
-    required: true,
-    category: "allergies"
-  });
-
-  if (signals.isFollowUp) {
-    addQuestion({
-      question: "Since your last visit, what has improved and what still worries you?",
-      type: "text",
-      required: true,
-      category: "follow_up"
-    });
-  }
-
-  if (signals.hasHypertension) {
-    addQuestion({
-      question: "Please share your recent blood pressure readings (with date/time if available).",
-      type: "text",
-      required: false,
-      category: "vitals"
-    });
-  }
-
-  if (signals.hasDiabetes) {
-    addQuestion({
-      question: "What were your recent blood sugar values (fasting/post-meal/random), if checked?",
-      type: "text",
-      required: false,
-      category: "vitals"
-    });
-  }
-
-  if (signals.hasRespiratoryConcern || signals.hasCardiacConcern) {
-    addQuestion({
-      question: "Do you currently have shortness of breath, chest tightness, wheeze, blue lips, or inability to speak full sentences?",
-      type: "text",
-      required: true,
-      category: "red_flags"
-    });
-  }
-
-  if (signals.hasCardiacConcern) {
-    addQuestion({
-      question: "If there is chest pain, does it spread to jaw/left arm or worsen on exertion?",
-      type: "text",
-      required: false,
-      category: "cardiac"
-    });
-  }
-
-  if (signals.hasFeverConcern) {
-    addQuestion({
-      question: "What is the highest temperature recorded in the last 48 hours?",
-      type: "text",
-      required: false,
-      category: "vitals"
-    });
-
-    addQuestion({
-      question: "Any danger signs with fever such as confusion, persistent vomiting, breathing difficulty, or very low urine output?",
-      type: "text",
-      required: false,
-      category: "red_flags"
-    });
-  }
-
-  if (signals.hasGastroConcern) {
-    addQuestion({
-      question: "Is the discomfort related to meals, and have you noticed vomiting, black stools, or severe pain?",
-      type: "text",
-      required: false,
-      category: "gastro"
-    });
-  }
-
-  if (signals.hasSleepOrFatigue) {
-    addQuestion({
-      question: "How many hours do you sleep, and do you wake feeling rested?",
-      type: "text",
-      required: false,
-      category: "lifestyle"
-    });
-  }
-
-  if (signals.hasDiabetes || signals.hasHypertension || signals.isSenior) {
-    addQuestion({
-      question: "Please share your latest recent readings if available (BP, sugar, pulse, SpO2, and weight changes).",
-      type: "text",
-      required: false,
-      category: "vitals"
-    });
-  }
-
-  if (signals.isPediatric) {
-    addQuestion({
-      question: "For the child, are appetite, fluid intake, urine output, and activity level normal?",
-      type: "text",
-      required: true,
-      category: "pediatrics"
-    });
-  }
-
-  if (signals.isSenior) {
-    addQuestion({
-      question: "Any recent falls, confusion, or sudden change in daily activities?",
-      type: "yesno",
-      required: false,
-      category: "geriatrics"
-    });
-  }
-
-  if (signals.mayNeedPregnancyScreen && (signals.hasFeverConcern || signals.hasGastroConcern)) {
-    addQuestion({
-      question: "Could you be pregnant, or is there a chance of missed periods?",
-      type: "yesno",
-      required: false,
-      category: "safety"
-    });
-  }
-
-  if (signals.hasMedicationRisk) {
-    addQuestion({
-      question: "Please mention which medicine caused a reaction and what happened.",
-      type: "text",
-      required: false,
-      category: "allergies"
-    });
-  }
-
-  return questions.slice(0, 10).map((question, index) => ({
-    id: `precheck-${appointment.id}-${index + 1}`,
-    ...question
-  }));
+  return {
+    patientId: patient?.id || "",
+    chiefComplaint: signals.chiefComplaint || "",
+    patientName: patient?.fullName || "",
+    patientAge: patient?.age,
+    patientGender: patient?.gender || "",
+    patientNotes,
+    transcript: transcriptContext.join(". "),
+    doctorSpecialty: doctor?.specialty || "",
+    appointmentType: appointment?.visitType || "",
+    existingConditions: signals.knownConditions || [],
+    latestSymptoms,
+    currentMedications: signals.knownMedications || [],
+    knownAllergies: signals.knownAllergies || []
+  };
 }
 
 function createPrecheckQuestionnaire(
   state,
   appointment,
-  { status = "sent_to_patient", sendToPatient = true, forceRegenerate = false } = {}
+  {
+    status = "sent_to_patient",
+    sendToPatient = true,
+    forceRegenerate = false,
+    aiQuestions = [],
+    metadata = {}
+  } = {}
 ) {
   if (!appointment) {
     return null;
@@ -816,9 +823,8 @@ function createPrecheckQuestionnaire(
     return existing;
   }
 
-  const patient = state.patients.byId[appointment.patientId];
   const doctor = state.doctors.byId[appointment.doctorId];
-  const questions = buildPrecheckQuestionsForAppointment(state, appointment, patient, doctor);
+  const questions = normalizePrecheckQuestionsForStorage(aiQuestions, appointment.id);
 
   if (existing && forceRegenerate) {
     const refreshed = {
@@ -831,6 +837,10 @@ function createPrecheckQuestionnaire(
       doctorConfirmedAt: null,
       sentToPatientAt: null,
       precheckSummary: null,
+      metadata: {
+        ...(existing?.metadata || {}),
+        ...(metadata || {})
+      },
       updatedAt: new Date().toISOString()
     };
     upsertPrecheckQuestionnaireEntity(state, refreshed);
@@ -853,7 +863,8 @@ function createPrecheckQuestionnaire(
     sentToPatientAt: sendToPatient ? new Date().toISOString() : null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    precheckSummary: null
+    precheckSummary: null,
+    metadata: { ...(metadata || {}) }
   };
 
   upsertPrecheckQuestionnaireEntity(state, questionnaire);
@@ -867,6 +878,94 @@ function createPrecheckQuestionnaire(
 
 function getPrecheckQuestionnaireByAppointment(snapshot, appointmentId) {
   return listCollection(snapshot.precheckQuestionnaires).find((item) => item.appointmentId === appointmentId) || null;
+}
+
+async function ensureAiPrecheckQuestionnaire(
+  appointmentId,
+  {
+    forceRegenerate = false,
+    status = "sent_to_patient",
+    notifyPatient = false,
+    notificationTitle = "Pre-check questions ready",
+    notificationMessage = "Your AI pre-check is ready. Please answer before the appointment."
+  } = {}
+) {
+  const snapshot = readRaw();
+  const appointment = snapshot.appointments.byId[appointmentId];
+  if (!appointment) {
+    throw new Error("Appointment not found.");
+  }
+
+  const existing = getPrecheckQuestionnaireByAppointment(snapshot, appointmentId);
+  if (!forceRegenerate && existing && !shouldRefreshDiseaseSpecificPrecheck(existing)) {
+    return snapshot;
+  }
+
+  const patient = snapshot.patients.byId[appointment.patientId] || {};
+  const doctor = snapshot.doctors.byId[appointment.doctorId] || {};
+  const adaptiveContext = buildAiPrecheckContextForAppointment(snapshot, appointment, patient, doctor);
+  const generationMetadata = buildDiseaseSpecificPrecheckMetadata([], existing?.metadata, {
+    targetQuestionCount: existing?.metadata?.targetQuestionCount,
+    chiefComplaint: adaptiveContext.chiefComplaint,
+    adaptiveComplete: false
+  });
+
+  const timestamp = new Date().toISOString();
+  return updateState((state) => {
+    const currentAppointment = state.appointments.byId[appointmentId];
+    if (!currentAppointment) {
+      throw new Error("Appointment not found.");
+    }
+
+    const currentQuestionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
+    const questionnaire = createPrecheckQuestionnaire(state, currentAppointment, {
+      status,
+      sendToPatient: status === "sent_to_patient",
+      forceRegenerate: Boolean(currentQuestionnaire),
+      aiQuestions: [],
+      metadata: generationMetadata
+    });
+    const updatedQuestionnaire = {
+      ...questionnaire,
+      status,
+      aiQuestions: [],
+      editedQuestions: [],
+      patientResponses: {},
+      patientCompletedAt: null,
+      doctorConfirmedAt: questionnaire?.doctorConfirmedAt || null,
+      sentToPatientAt: status === "sent_to_patient" ? (questionnaire?.sentToPatientAt || timestamp) : null,
+      precheckSummary: null,
+      metadata: buildDiseaseSpecificPrecheckMetadata([], questionnaire?.metadata, {
+        targetQuestionCount: generationMetadata.targetQuestionCount,
+        chiefComplaint: generationMetadata.chiefComplaint,
+        adaptiveComplete: false
+      }),
+      updatedAt: timestamp
+    };
+
+    upsertPrecheckQuestionnaireEntity(state, updatedQuestionnaire);
+    state.encounters.byId[`encounter-${appointmentId}`] = {
+      ...(state.encounters.byId[`encounter-${appointmentId}`] || {}),
+      precheckQuestionnaireId: updatedQuestionnaire.id,
+      precheckStatus: updatedQuestionnaire.status
+    };
+
+    if (notifyPatient) {
+      upsertNotificationEntity(
+        state,
+        createDemoNotification({
+          userId: currentAppointment.patientId,
+          type: "precheck_sent",
+          title: notificationTitle,
+          message: notificationMessage,
+          encounterId: `encounter-${appointmentId}`,
+          questionnaireId: updatedQuestionnaire.id
+        })
+      );
+    }
+
+    return state;
+  });
 }
 
 function createDemoNotification({
@@ -1142,6 +1241,249 @@ function buildDbDiagnosisPayload(draft) {
   return draft?.soap?.assessment || "Clinical review";
 }
 
+function extractTokenNumber(token) {
+  const match = String(token || "").match(/\d+/);
+  return match ? Number(match[0]) : null;
+}
+
+function buildLocalPrecheckContextKey(state, appointmentId) {
+  const baseContextKey = `${state?.session?.role || "patient"}:${state?.session?.userId || state?.session?.activeProfileId || "anonymous"}`;
+  return appointmentId ? `${baseContextKey}:precheck:${appointmentId}` : baseContextKey;
+}
+
+function buildPrecheckSessionMetadata(state, appointment, metadata = {}) {
+  const appointmentId = appointment?.id || metadata?.appointmentId || null;
+  return {
+    source: "patient_precheck",
+    workflow: "patient_precheck",
+    sessionType: "precheck_chat",
+    chatContextKey: metadata?.chatContextKey || buildLocalPrecheckContextKey(state, appointmentId),
+    submittedFrom: metadata?.submittedFrom || "patient_chatbot",
+    ...metadata
+  };
+}
+
+function normalizePrecheckSubmissionPayload(payload) {
+  if (
+    payload
+    && typeof payload === "object"
+    && !Array.isArray(payload)
+    && ("patientResponses" in payload || "metadata" in payload)
+  ) {
+    return {
+      patientResponses:
+        payload.patientResponses && typeof payload.patientResponses === "object" && !Array.isArray(payload.patientResponses)
+          ? payload.patientResponses
+          : {},
+      metadata:
+        payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata)
+          ? payload.metadata
+          : {}
+    };
+  }
+
+  return {
+    patientResponses:
+      payload && typeof payload === "object" && !Array.isArray(payload)
+        ? payload
+        : {},
+    metadata: {}
+  };
+}
+
+function normalizeRawPrecheckResponsesMap(rawResponses) {
+  if (!rawResponses || typeof rawResponses !== "object" || Array.isArray(rawResponses)) {
+    return {};
+  }
+
+  return Object.entries(rawResponses).reduce((acc, [questionId, responseText]) => {
+    const normalizedQuestionId = String(questionId || "").trim();
+    const normalizedResponseText = String(responseText || "").trim();
+    if (!normalizedQuestionId || !normalizedResponseText) {
+      return acc;
+    }
+    acc[normalizedQuestionId] = normalizedResponseText;
+    return acc;
+  }, {});
+}
+
+function buildDbEncounterSyncPayload(snapshot, appointmentId, overrides = {}) {
+  const appointment = snapshot?.appointments?.byId?.[appointmentId] || null;
+  const encounter = snapshot?.encounters?.byId?.[`encounter-${appointmentId}`] || null;
+  const patient = appointment ? snapshot?.patients?.byId?.[appointment.patientId] || null : null;
+  const doctor = appointment ? snapshot?.doctors?.byId?.[appointment.doctorId] || null : null;
+  const dbSync = getDbSyncRecord(snapshot, appointmentId);
+  const draft = overrides.draft ?? encounter?.apciDraft ?? null;
+
+  return {
+    encounterId: overrides.encounterId ?? dbSync?.encounterId ?? null,
+    appointmentId,
+    patientId: patient?.id || appointment?.patientId || null,
+    doctorId: doctor?.id || appointment?.doctorId || null,
+    clinicId: doctor?.clinic || "NIRA Pilot Clinic",
+    scheduledTime: overrides.scheduledTime ?? appointment?.startAt ?? null,
+    checkInTime: overrides.checkInTime ?? null,
+    completedTime: overrides.completedTime ?? encounter?.approvedAt ?? null,
+    type: overrides.type ?? appointment?.visitType ?? "opd",
+    status: overrides.status ?? encounter?.status ?? "planned",
+    localStatus: overrides.localStatus ?? encounter?.status ?? "planned",
+    bookingStatus: overrides.bookingStatus ?? appointment?.bookingStatus ?? null,
+    chiefComplaint: overrides.chiefComplaint ?? draft?.soap?.chiefComplaint ?? appointment?.visitType ?? "Clinical review",
+    aiPrechart: overrides.aiPrechart ?? draft ?? null,
+    doctorNotes: overrides.doctorNotes ?? {
+      note: encounter?.doctorReview?.note || "",
+      reviewedAt: encounter?.doctorReview?.reviewedAt || null,
+      approved: Boolean(encounter?.doctorReview?.approved),
+      finalClinicalNote: encounter?.finalClinicalNote || ""
+    },
+    vitals: overrides.vitals ?? draft?.vitals ?? null,
+    tokenNumber: overrides.tokenNumber ?? extractTokenNumber(appointment?.token),
+    priority: overrides.priority ?? null,
+    metadata: {
+      appointmentToken: appointment?.token || null,
+      visitType: appointment?.visitType || null,
+      ...(encounter?.metadata || {}),
+      ...overrides.metadata
+    }
+  };
+}
+
+function buildDbInterviewSyncPayload(snapshot, appointmentId, overrides = {}) {
+  const interview = overrides.interview || snapshot?.interviews?.byId?.[`interview-${appointmentId}`] || null;
+  const encounter = snapshot?.encounters?.byId?.[`encounter-${appointmentId}`] || null;
+  const appointment = snapshot?.appointments?.byId?.[appointmentId] || null;
+  const patient = appointment ? snapshot?.patients?.byId?.[appointment.patientId] || null : null;
+  const dbSync = getDbSyncRecord(snapshot, appointmentId);
+
+  return {
+    interviewId: overrides.interviewId ?? dbSync?.interviewId ?? interview?.id ?? null,
+    appointmentId,
+    encounterId: overrides.encounterId ?? dbSync?.encounterId ?? null,
+    patientId: overrides.patientId ?? patient?.id ?? appointment?.patientId ?? null,
+    language: overrides.language ?? interview?.language ?? "en",
+    status: overrides.status ?? interview?.completionStatus ?? "in-progress",
+    transcript: overrides.transcript ?? interview?.transcript ?? [],
+    aiSummary: overrides.aiSummary ?? {
+      chiefComplaint: encounter?.apciDraft?.soap?.chiefComplaint || "",
+      assessment: encounter?.apciDraft?.soap?.assessment || "",
+      extractedFindings: interview?.extractedFindings || []
+    },
+    completedAt: overrides.completedAt ?? (String(interview?.completionStatus || "").toLowerCase() === "complete" ? new Date().toISOString() : null),
+    metadata: {
+      localInterviewId: interview?.id || null,
+      ...(interview?.metadata || {}),
+      ...overrides.metadata
+    }
+  };
+}
+
+function buildDbPrecheckSyncPayload(snapshot, appointmentId, questionnaire, overrides = {}) {
+  const appointment = snapshot?.appointments?.byId?.[appointmentId] || null;
+  const doctor = appointment ? snapshot?.doctors?.byId?.[appointment.doctorId] || null : null;
+  const dbSync = getDbSyncRecord(snapshot, appointmentId);
+
+  return {
+    questionnaireId: overrides.questionnaireId ?? dbSync?.precheckQuestionnaireId ?? questionnaire?.id ?? null,
+    appointmentId,
+    encounterId: overrides.encounterId ?? dbSync?.encounterId ?? null,
+    patientId: overrides.patientId ?? appointment?.patientId ?? questionnaire?.patientId ?? null,
+    doctorId: overrides.doctorId ?? appointment?.doctorId ?? questionnaire?.doctorId ?? null,
+    clinicId: overrides.clinicId ?? doctor?.clinic ?? questionnaire?.clinicId ?? "NIRA Pilot Clinic",
+    aiQuestions: overrides.aiQuestions ?? questionnaire?.aiQuestions ?? [],
+    editedQuestions: overrides.editedQuestions ?? questionnaire?.editedQuestions ?? [],
+    patientResponses: overrides.patientResponses ?? questionnaire?.patientResponses ?? {},
+    status: overrides.status ?? questionnaire?.status ?? "ai_generated",
+    doctorConfirmedAt: overrides.doctorConfirmedAt ?? questionnaire?.doctorConfirmedAt ?? null,
+    sentToPatientAt: overrides.sentToPatientAt ?? questionnaire?.sentToPatientAt ?? null,
+    patientCompletedAt: overrides.patientCompletedAt ?? questionnaire?.patientCompletedAt ?? null,
+    metadata: {
+      localQuestionnaireId: questionnaire?.id || null,
+      ...(questionnaire?.metadata || {}),
+      ...overrides.metadata
+    }
+  };
+}
+
+function buildDbLabReportSyncPayload(snapshot, appointmentId, report, overrides = {}) {
+  const appointment = snapshot?.appointments?.byId?.[appointmentId] || null;
+  const doctor = appointment ? snapshot?.doctors?.byId?.[appointment.doctorId] || null : null;
+  const dbSync = getDbSyncRecord(snapshot, appointmentId);
+
+  return {
+    reportId: overrides.reportId ?? report?.id ?? `lab-${appointmentId}`,
+    appointmentId,
+    encounterId: overrides.encounterId ?? dbSync?.encounterId ?? null,
+    patientId: overrides.patientId ?? appointment?.patientId ?? report?.patientId ?? null,
+    doctorId: overrides.doctorId ?? appointment?.doctorId ?? report?.doctorId ?? null,
+    clinicId: overrides.clinicId ?? doctor?.clinic ?? "NIRA Pilot Clinic",
+    title: overrides.title ?? report?.title ?? "Clinical lab summary",
+    category: overrides.category ?? report?.category ?? "General panel",
+    findings: overrides.findings ?? report?.findings ?? "",
+    resultSummary: overrides.resultSummary ?? report?.resultSummary ?? "",
+    status: overrides.status ?? report?.status ?? "draft",
+    metadata: {
+      localReportId: report?.id || null,
+      ...overrides.metadata
+    }
+  };
+}
+
+function buildDbTestOrderSyncPayload(snapshot, appointmentId, order, overrides = {}) {
+  const appointment = snapshot?.appointments?.byId?.[appointmentId] || null;
+  const doctor = appointment ? snapshot?.doctors?.byId?.[appointment.doctorId] || null : null;
+  const dbSync = getDbSyncRecord(snapshot, appointmentId);
+
+  return {
+    orderId: overrides.orderId ?? order?.id ?? `tests-${appointmentId}`,
+    appointmentId,
+    encounterId: overrides.encounterId ?? dbSync?.encounterId ?? null,
+    patientId: overrides.patientId ?? appointment?.patientId ?? order?.patientId ?? null,
+    doctorId: overrides.doctorId ?? appointment?.doctorId ?? order?.doctorId ?? null,
+    clinicId: overrides.clinicId ?? doctor?.clinic ?? "NIRA Pilot Clinic",
+    doctorName: overrides.doctorName ?? order?.doctorName ?? doctor?.fullName ?? "Your doctor",
+    tests: overrides.tests ?? order?.tests ?? [],
+    patientNote: overrides.patientNote ?? order?.patientNote ?? null,
+    status: overrides.status ?? order?.status ?? "ordered",
+    orderedAt: overrides.orderedAt ?? order?.orderedAt ?? new Date().toISOString(),
+    metadata: {
+      localOrderId: order?.id || null,
+      ...overrides.metadata
+    }
+  };
+}
+
+function resolveNotificationAppointmentId(notification) {
+  if (notification?.appointmentId) {
+    return notification.appointmentId;
+  }
+  const encounterId = String(notification?.encounterId || "");
+  return encounterId.startsWith("encounter-") ? encounterId.slice("encounter-".length) : null;
+}
+
+function buildDbNotificationSyncPayload(snapshot, notification, overrides = {}) {
+  const appointmentId = overrides.appointmentId ?? resolveNotificationAppointmentId(notification);
+  const dbSync = appointmentId ? getDbSyncRecord(snapshot, appointmentId) : null;
+
+  return {
+    notificationId: overrides.notificationId ?? notification?.id ?? null,
+    userId: overrides.userId ?? notification?.userId ?? null,
+    type: overrides.type ?? notification?.type ?? "emr_updated",
+    title: overrides.title ?? notification?.title ?? "NIRA update",
+    message: overrides.message ?? notification?.message ?? "",
+    encounterId: overrides.encounterId ?? dbSync?.encounterId ?? null,
+    questionnaireId: overrides.questionnaireId ?? dbSync?.precheckQuestionnaireId ?? null,
+    prescriptionId: overrides.prescriptionId ?? dbSync?.prescriptionId ?? null,
+    appointmentId,
+    metadata: {
+      localEncounterId: notification?.encounterId || null,
+      localQuestionnaireId: notification?.questionnaireId || null,
+      localPrescriptionId: notification?.prescriptionId || null,
+      localTestOrderId: notification?.testOrderId || null,
+      ...overrides.metadata
+    }
+  };
+}
+
 function createOrUpdateLabReport(state, appointmentId, payload = {}, nextStatus = "draft") {
   const appointment = state.appointments.byId[appointmentId];
   if (!appointment) {
@@ -1243,6 +1585,184 @@ function buildInterviewFromChatMessages(appointmentId, messages = [], language =
   };
 }
 
+function buildChatbotMetadata(chat = {}) {
+  const clinicalSnapshot = String(chat?.summary || "").trim();
+  const detectedFocus = String(chat?.detectedFocus || "").trim();
+  const triageLevel = String(chat?.triageLevel || "").trim();
+  const escalationBand = String(chat?.escalationBand || "").trim();
+  const redFlags = Array.isArray(chat?.redFlags)
+    ? chat.redFlags.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const suggestedVitals = Array.isArray(chat?.suggestedVitals)
+    ? chat.suggestedVitals.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+
+  if (!clinicalSnapshot && !detectedFocus && !triageLevel && !escalationBand && !redFlags.length && !suggestedVitals.length) {
+    return null;
+  }
+
+  return {
+    clinicalSnapshot,
+    detectedFocus,
+    triageLevel,
+    escalationBand,
+    redFlags,
+    suggestedVitals
+  };
+}
+
+function getQuestionnaireQuestions(questionnaire) {
+  return questionnaire?.editedQuestions?.length ? questionnaire.editedQuestions : questionnaire?.aiQuestions || [];
+}
+
+function buildAnsweredPrecheckEntries(questionnaire) {
+  const responses = questionnaire?.patientResponses || {};
+  const rawResponses = normalizeRawPrecheckResponsesMap(questionnaire?.metadata?.rawPatientResponses);
+  return getQuestionnaireQuestions(questionnaire)
+    .map((question) => {
+      const answer = String(responses?.[question.id] || "").trim();
+      if (!answer) return null;
+      const rawAnswer = String(rawResponses?.[question.id] || answer).trim() || answer;
+      return {
+        id: question.id,
+        question: String(question.question || "").trim(),
+        answer,
+        rawAnswer,
+        type: String(question.type || "text").toLowerCase(),
+        category: String(question.category || "").toLowerCase()
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildAdaptivePrecheckTurnInput(snapshot, appointment, patient, doctor, questionnaire) {
+  return {
+    encounterId: `encounter-${appointment.id}`,
+    appointmentContext: buildAdaptivePrecheckContext(snapshot, appointment, patient, doctor, questionnaire),
+    sessionState: {
+      askedQuestions: questionnaire?.aiQuestions || [],
+      answeredEntries: buildAnsweredPrecheckEntries(questionnaire),
+      targetQuestionCount: getAdaptivePrecheckTargetQuestionCount(questionnaire)
+    }
+  };
+}
+
+function appendAdaptivePrecheckQuestion(questionnaire, appointmentId, nextQuestion) {
+  return normalizePrecheckQuestionsForStorage(
+    [...(Array.isArray(questionnaire?.aiQuestions) ? questionnaire.aiQuestions : []), nextQuestion],
+    appointmentId
+  );
+}
+
+function buildInterviewFromPrecheckQuestionnaire(appointmentId, questionnaire, language = "en") {
+  const answeredEntries = buildAnsweredPrecheckEntries(questionnaire);
+  const transcript = answeredEntries.flatMap((entry) => ([
+    { role: "ai", text: entry.question },
+    { role: "patient", text: entry.rawAnswer || entry.answer }
+  ]));
+  const extractedFindings = dedupeList(
+    answeredEntries.map((entry) => `${entry.question}: ${entry.rawAnswer || entry.answer}`)
+  ).slice(0, 8);
+
+  return {
+    id: `interview-${appointmentId}`,
+    appointmentId,
+    language,
+    transcript,
+    extractedFindings,
+    completionStatus: transcript.length > 0 ? "complete" : "pending",
+    metadata: {
+      ...(questionnaire?.metadata || {})
+    }
+  };
+}
+
+function deriveAnswersFromPrecheckQuestionnaire(questionnaire) {
+  const answeredEntries = buildAnsweredPrecheckEntries(questionnaire);
+  const associatedDetails = [];
+  let primaryConcern = "";
+  let duration = "";
+  let severity = "";
+  let medications = "";
+  let allergies = "";
+
+  answeredEntries.forEach((entry) => {
+    const question = toLowerText(entry.question);
+    const category = entry.category;
+
+    if (
+      !primaryConcern &&
+      (
+        category.includes("symptom")
+        || category.includes("reason")
+        || /what.*(problem|concern|complaint|brings you)|main concern|main symptom|chief complaint/.test(question)
+      )
+    ) {
+      primaryConcern = entry.answer;
+      return;
+    }
+
+    if (
+      !duration &&
+      (
+        category.includes("timeline")
+        || /how long|when did.*start|duration|since when/.test(question)
+      )
+    ) {
+      duration = entry.answer;
+      return;
+    }
+
+    if (
+      !severity &&
+      (
+        category.includes("severity")
+        || entry.type === "rating"
+        || /severity|scale of 1|1 to 10|pain score/.test(question)
+      )
+    ) {
+      severity = entry.answer;
+      return;
+    }
+
+    if (
+      !medications &&
+      (
+        category.includes("medication")
+        || /medicine|medication|supplement|home remed/.test(question)
+      )
+    ) {
+      medications = entry.answer;
+      return;
+    }
+
+    if (
+      !allergies &&
+      (
+        category.includes("allerg")
+        || /allerg/.test(question)
+      )
+    ) {
+      allergies = entry.answer;
+      return;
+    }
+
+    associatedDetails.push(`${entry.question}: ${entry.answer}`);
+  });
+
+  const fallbackAnswers = answeredEntries.map((entry) => entry.answer).filter(Boolean);
+
+  return {
+    primaryConcern: primaryConcern || String(questionnaire?.metadata?.chiefComplaint || "").trim() || fallbackAnswers[0] || "Pre-check responses captured",
+    duration,
+    severity: severity || "Not stated",
+    associatedSymptoms: dedupeList(associatedDetails).join(" | ") || fallbackAnswers.slice(1, 4).join(" | ") || "Additional symptoms not stated",
+    medications: medications || "None reported",
+    allergies: allergies || "None reported",
+    language: "en"
+  };
+}
+
 function resolveChatDoctor(state, preferredDoctorLabel = "") {
   const normalizedPreference = String(preferredDoctorLabel || "").toLowerCase().trim();
   const activeDoctors = listCollection(state.doctors).filter((doctor) => doctor.status === "active" && doctor.acceptingAppointments);
@@ -1276,31 +1796,6 @@ function findBestSlotForDoctor(state, doctorId) {
   }
 
   return null;
-}
-
-function mapCdssQuestionsToUi(questions = [], appointmentId = "") {
-  return (Array.isArray(questions) ? questions : []).map((question, index) => {
-    const answerType = String(question.answer_type || "text").toLowerCase();
-    const mappedType =
-      answerType === "boolean"
-        ? "yesno"
-        : answerType === "choice"
-          ? "multiple_choice"
-          : answerType === "number"
-            ? "rating"
-            : "text";
-
-    return {
-      id: question.question_id || `precheck-${appointmentId}-${index + 1}`,
-      question: question.question || "",
-      type: mappedType,
-      options: Array.isArray(question.options) ? question.options : [],
-      required: question.required !== false,
-      category: "ai_precheck",
-      rationale: question.rationale || "",
-      confidence: Number(question.confidence || 0)
-    };
-  });
 }
 
 function toCdssPrecheckAnswers(questionnaire) {
@@ -1357,7 +1852,7 @@ function syncDoctorAndMaybeOriginal(state, doctorIds) {
 
 export const demoStore = {
   async getState() {
-    await hydrateStateFromMongo();
+    await hydrateStateFromSnapshot();
     return clone(readRaw());
   },
 
@@ -1952,23 +2447,6 @@ export const demoStore = {
       upsertAppointment(state, appointment);
       upsertInterview(state, interview);
       upsertEncounter(state, encounter);
-          const questionnaire = createPrecheckQuestionnaire(state, appointment, {
-            status: "sent_to_patient",
-            sendToPatient: true
-          });
-          if (questionnaire) {
-            upsertNotificationEntity(
-              state,
-              createDemoNotification({
-                userId: payload.patientId,
-                type: "precheck_sent",
-                title: "Pre-check questions ready",
-                message: "Your AI pre-check is ready. Please answer before the appointment.",
-                encounterId: encounter.id,
-                questionnaireId: questionnaire.id
-              })
-            );
-          }
       state.ui.lastViewedAppointmentId = appointmentId;
       syncDoctorDaySchedules(state, payload.doctorId, state.meta.today, 30);
       return state;
@@ -1979,38 +2457,14 @@ export const demoStore = {
     const doctor = snapshot.doctors.byId[appointment.doctorId];
 
     try {
-      const cdssPrecheck = await generateCdssPrecheck({
-        patientId: patient.id,
-        encounterId: `encounter-${appointment.id}`,
-        chiefComplaint: appointment.visitType || "OPD consultation",
-        transcript: ""
+      snapshot = await ensureAiPrecheckQuestionnaire(appointment.id, {
+        status: "sent_to_patient",
+        notifyPatient: true,
+        notificationTitle: "Pre-check questions ready",
+        notificationMessage: "Your AI pre-check is ready. Please answer before the appointment."
       });
-      const mappedQuestions = mapCdssQuestionsToUi(cdssPrecheck?.questions, appointment.id);
-
-      if (mappedQuestions.length > 0) {
-        snapshot = updateState((state) => {
-          const questionnaire = getPrecheckQuestionnaireByAppointment(state, appointment.id)
-            || createPrecheckQuestionnaire(state, appointment, { status: "sent_to_patient", sendToPatient: true });
-
-          upsertPrecheckQuestionnaireEntity(state, {
-            ...questionnaire,
-            status: "sent_to_patient",
-            aiQuestions: mappedQuestions,
-            editedQuestions: [],
-            sentToPatientAt: questionnaire.sentToPatientAt || new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          });
-
-          state.encounters.byId[`encounter-${appointment.id}`] = {
-            ...state.encounters.byId[`encounter-${appointment.id}`],
-            precheckQuestionnaireId: questionnaire.id,
-            precheckStatus: "sent_to_patient"
-          };
-          return state;
-        });
-      }
     } catch (error) {
-      console.warn("[NIRA] CDSS precheck unavailable; using local fallback questions.", error);
+      console.warn("[NIRA] AI precheck unavailable during booking; questionnaire not created yet.", error);
     }
 
     try {
@@ -2058,16 +2512,57 @@ export const demoStore = {
         patientId: patient.id,
         doctorId: doctor.id,
         clinicId: doctor.clinic || "NIRA Pilot Clinic",
+        appointmentId: appointment.id,
         scheduledTime: appointment.startAt,
         type: appointment.visitType || "opd",
-        chiefComplaint: "Pending symptom interview"
+        chiefComplaint: "Pending symptom interview",
+        tokenNumber: extractTokenNumber(appointment.token),
+        status: "planned",
+        metadata: {
+          bookingStatus: appointment.bookingStatus,
+          token: appointment.token
+        }
       });
 
       const dbInterview = await createInterview({
+        interviewId: `interview-${appointment.id}`,
+        appointmentId: appointment.id,
         encounterId: dbEncounter.id,
         patientId: patient.id,
-        language: payload.language || "en"
+        language: payload.language || "en",
+        transcript: [],
+        status: "in-progress",
+        metadata: {
+          source: "booking"
+        }
       });
+
+      const questionnaire = getPrecheckQuestionnaireByAppointment(snapshot, appointment.id);
+      const dbQuestionnaire = questionnaire
+        ? await upsertDbPrecheckQuestionnaire(
+          buildDbPrecheckSyncPayload(snapshot, appointment.id, questionnaire, {
+            encounterId: dbEncounter.id,
+            metadata: {
+              source: "booking"
+            }
+          })
+        )
+        : null;
+
+      const dbPrecheckNotification = questionnaire
+        ? listCollection(snapshot.notifications).find(
+          (item) => item.type === "precheck_sent" && item.questionnaireId === questionnaire.id
+        ) || null
+        : null;
+
+      if (dbPrecheckNotification) {
+        await createDbNotification(
+          buildDbNotificationSyncPayload(snapshot, dbPrecheckNotification, {
+            encounterId: dbEncounter.id,
+            questionnaireId: dbQuestionnaire?.id || null
+          })
+        );
+      }
 
       snapshot = updateState((state) => {
         upsertDbSyncEntity(state, {
@@ -2075,7 +2570,10 @@ export const demoStore = {
           appointmentId: appointment.id,
           encounterId: dbEncounter.id,
           interviewId: dbInterview.id,
+          precheckQuestionnaireId: dbQuestionnaire?.id || null,
           prescriptionId: null,
+          labReportId: null,
+          testOrderId: null,
           bookingSyncedAt: new Date().toISOString(),
           interviewSyncedAt: null,
           approvalSyncedAt: null,
@@ -2106,7 +2604,7 @@ export const demoStore = {
 
   async cancelAppointment(appointmentId) {
     await wait();
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const appointment = state.appointments.byId[appointmentId];
       if (!appointment) {
         throw new Error("Appointment not found.");
@@ -2128,18 +2626,97 @@ export const demoStore = {
       syncDoctorDaySchedules(state, appointment.doctorId, state.meta.today, 30);
       return state;
     });
+
+    try {
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      if (dbSync?.encounterId) {
+        await upsertEncounterSnapshot(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            status: "cancelled",
+            metadata: {
+              source: "appointment_cancelled"
+            }
+          })
+        );
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+          upsertDbSyncEntity(state, {
+            ...existing,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Appointment cancelled locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async rescheduleAppointment(appointmentId, payload) {
     await wait(160);
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const appointment = state.appointments.byId[appointmentId];
       if (!appointment) {
         throw new Error("Appointment not found.");
       }
 
-      const nextSlot = ensureBookableSlot(state, payload.doctorId, payload.date, payload.slotId);
+      const finalizeChatbotBooking = Boolean(payload?.finalizeChatbotBooking);
+      const sameExistingSelection =
+        appointment.doctorId === payload.doctorId
+        && appointment.slotId === payload.slotId
+        && String(appointment.startAt || "").slice(0, 10) === payload.date;
+      const nextSlot = sameExistingSelection
+        ? {
+          id: appointment.slotId,
+          startAt: appointment.startAt,
+          endAt: appointment.endAt
+        }
+        : ensureBookableSlot(state, payload.doctorId, payload.date, payload.slotId);
       const originalDoctorId = appointment.doctorId;
+      const nextRescheduleHistory = sameExistingSelection
+        ? [...(appointment.rescheduleHistory || [])]
+        : [
+          ...(appointment.rescheduleHistory || []),
+          {
+            fromSlotId: appointment.slotId,
+            toSlotId: payload.slotId,
+            changedAt: new Date().toISOString()
+          }
+        ];
+      const nextToken = finalizeChatbotBooking && appointment.visitType === "chatbot_intake"
+        ? buildToken(payload.doctorId)
+        : appointment.token;
 
       state.appointments.byId[appointmentId] = {
         ...appointment,
@@ -2147,15 +2724,10 @@ export const demoStore = {
         slotId: payload.slotId,
         startAt: nextSlot.startAt,
         endAt: nextSlot.endAt,
-        bookingStatus: "rescheduled",
-        rescheduleHistory: [
-          ...(appointment.rescheduleHistory || []),
-          {
-            fromSlotId: appointment.slotId,
-            toSlotId: payload.slotId,
-            changedAt: new Date().toISOString()
-          }
-        ]
+        token: nextToken,
+        visitType: payload.visitType || appointment.visitType,
+        bookingStatus: finalizeChatbotBooking ? "scheduled" : "rescheduled",
+        rescheduleHistory: nextRescheduleHistory
       };
 
       const encounter = state.encounters.byId[`encounter-${appointmentId}`];
@@ -2166,9 +2738,73 @@ export const demoStore = {
         };
       }
 
+      const emrSync = state.emrSync.byId[`emr-${appointmentId}`];
+      if (emrSync) {
+        state.emrSync.byId[emrSync.id] = {
+          ...emrSync,
+          localDoctorId: payload.doctorId
+        };
+      }
+
       syncDoctorAndMaybeOriginal(state, [originalDoctorId, payload.doctorId]);
       return state;
     });
+
+    try {
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      if (dbSync?.encounterId) {
+        await upsertEncounterSnapshot(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            scheduledTime: snapshot.appointments.byId[appointmentId]?.startAt || null,
+            doctorId: snapshot.appointments.byId[appointmentId]?.doctorId || null,
+            metadata: {
+              source: "appointment_rescheduled"
+            }
+          })
+        );
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+          upsertDbSyncEntity(state, {
+            ...existing,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Appointment rescheduled locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async submitInterview(appointmentId, answers) {
@@ -2321,12 +2957,16 @@ export const demoStore = {
     try {
       const appointment = snapshot.appointments.byId[appointmentId];
       const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      const interviewPayload = buildDbInterviewSyncPayload(snapshot, appointmentId, {
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        metadata: {
+          source: "patient_interview"
+        }
+      });
 
       if (dbSync?.interviewId) {
-        await updateInterview(dbSync.interviewId, {
-          language: answers.language || "en",
-          completion_status: "complete"
-        });
+        await updateInterview(dbSync.interviewId, interviewPayload);
 
         snapshot = updateState((state) => {
           const existing = state.dbSync.byId[`db-${appointmentId}`] || {
@@ -2348,11 +2988,7 @@ export const demoStore = {
           return state;
         });
       } else if (dbSync?.encounterId) {
-        const dbInterview = await createInterview({
-          encounterId: dbSync.encounterId,
-          patientId: appointment.patientId,
-          language: answers.language || "en"
-        });
+        const dbInterview = await createInterview(interviewPayload);
 
         snapshot = updateState((state) => {
           const existing = state.dbSync.byId[`db-${appointmentId}`] || {
@@ -2374,6 +3010,18 @@ export const demoStore = {
           });
           return state;
         });
+      }
+
+      if (dbSync?.encounterId) {
+        await upsertEncounterSnapshot(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            status: "ai_ready",
+            aiPrechart: snapshot.encounters.byId[`encounter-${appointmentId}`]?.apciDraft || null,
+            metadata: {
+              source: "patient_interview"
+            }
+          })
+        );
       }
     } catch (error) {
       console.warn("[NIRA] Interview stored locally; DB sync skipped.", error);
@@ -2402,7 +3050,7 @@ export const demoStore = {
 
   async syncChatbotSubmission(payload) {
     await wait(40);
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const patientId = payload?.patientId;
       if (!patientId || !state.patients.byId[patientId]) {
         throw new Error("Patient profile not found for chatbot submission.");
@@ -2456,6 +3104,7 @@ export const demoStore = {
       const existingEncounter = state.encounters.byId[`encounter-${appointment.id}`] || null;
       const baseDraft = existingEncounter?.apciDraft || emptyEncounterDraft(chiefComplaint);
       const subjectiveText = interview.transcript.map((entry) => `${entry.role}: ${entry.text}`).join("\n");
+      const chatbotMetadata = buildChatbotMetadata(payload?.submission?.chat) || existingEncounter?.chatbotMetadata || null;
 
       const encounter = {
         ...(existingEncounter || {}),
@@ -2496,6 +3145,7 @@ export const demoStore = {
             ? payload.submission.cdss.confidenceScores
             : {})
         },
+        chatbotMetadata,
         updatedAt: new Date().toISOString()
       };
       upsertEncounter(state, encounter);
@@ -2524,11 +3174,111 @@ export const demoStore = {
       syncDoctorDaySchedules(state, selectedDoctor.id, state.meta.today, 30);
       return state;
     });
+
+    try {
+      const appointmentId = snapshot.ui.lastViewedAppointmentId;
+      const appointment = appointmentId ? snapshot.appointments.byId[appointmentId] : null;
+      if (!appointment) {
+        return snapshot;
+      }
+
+      let dbSync = getDbSyncRecord(snapshot, appointmentId);
+      let dbEncounterId = dbSync?.encounterId || null;
+
+      if (!dbEncounterId) {
+        const dbEncounter = await createEncounter(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            status: "ai_ready",
+            chiefComplaint: snapshot.encounters.byId[`encounter-${appointmentId}`]?.apciDraft?.soap?.chiefComplaint || "Chatbot symptom intake",
+            metadata: {
+              source: "chatbot_submission"
+            }
+          })
+        );
+        dbEncounterId = dbEncounter.id;
+      }
+
+      const interviewPayload = buildDbInterviewSyncPayload(snapshot, appointmentId, {
+        encounterId: dbEncounterId,
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        metadata: {
+          source: "chatbot_submission"
+        }
+      });
+
+      const dbInterview = dbSync?.interviewId
+        ? await updateInterview(dbSync.interviewId, interviewPayload)
+        : await createInterview(interviewPayload);
+
+      await upsertEncounterSnapshot(
+        buildDbEncounterSyncPayload(snapshot, appointmentId, {
+          encounterId: dbEncounterId,
+          status: "ai_ready",
+          aiPrechart: snapshot.encounters.byId[`encounter-${appointmentId}`]?.apciDraft || null,
+          metadata: {
+            source: "chatbot_submission"
+          }
+        })
+      );
+
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+
+        upsertDbSyncEntity(state, {
+          ...existing,
+          encounterId: dbEncounterId,
+          interviewId: dbInterview.id,
+          bookingSyncedAt: existing.bookingSyncedAt || new Date().toISOString(),
+          interviewSyncedAt: new Date().toISOString(),
+          lastError: null
+        });
+        return state;
+      });
+    } catch (error) {
+      console.warn("[NIRA] Chatbot submission saved locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const appointmentId = state.ui.lastViewedAppointmentId || null;
+        if (!appointmentId) {
+          return state;
+        }
+
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async updatePrecheckQuestions(appointmentId, editedQuestions) {
     await wait(120);
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const appointment = state.appointments.byId[appointmentId];
       if (!appointment) {
         throw new Error("Appointment not found.");
@@ -2557,118 +3307,375 @@ export const demoStore = {
 
       return state;
     });
+
+    try {
+      const questionnaire = getPrecheckQuestionnaireByAppointment(snapshot, appointmentId);
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+
+      if (questionnaire && dbSync?.encounterId) {
+        const dbQuestionnaire = await upsertDbPrecheckQuestionnaire(
+          buildDbPrecheckSyncPayload(snapshot, appointmentId, questionnaire, {
+            status: "doctor_editing",
+            metadata: {
+              source: "doctor_precheck_edit"
+            }
+          })
+        );
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+
+          upsertDbSyncEntity(state, {
+            ...existing,
+            precheckQuestionnaireId: dbQuestionnaire.id,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Pre-check edits saved locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async regeneratePrecheckQuestions(appointmentId) {
     await wait(120);
-    const snapshot = readRaw();
-    const appointment = snapshot.appointments.byId[appointmentId];
-    if (!appointment) {
-      throw new Error("Appointment not found.");
-    }
+    let nextSnapshot = await ensureAiPrecheckQuestionnaire(appointmentId, {
+      forceRegenerate: true,
+      status: "sent_to_patient",
+      notifyPatient: true,
+      notificationTitle: "Updated pre-check questions",
+      notificationMessage: "AI has updated your pre-check questions. Please complete them before appointment."
+    });
 
-    const patient = snapshot.patients.byId[appointment.patientId] || {};
-    const doctor = snapshot.doctors.byId[appointment.doctorId] || {};
-    const encounter = snapshot.encounters.byId[`encounter-${appointmentId}`] || {};
-    const signals = inferProfileSignals(snapshot, appointment, patient, doctor);
-    const latestSymptoms = dedupeList([
-      ...(encounter?.apciDraft?.soap?.chiefComplaint ? [encounter.apciDraft.soap.chiefComplaint] : []),
-      ...(encounter?.apciDraft?.soap?.subjective ? splitListText(encounter.apciDraft.soap.subjective) : []),
-      ...(encounter?.interviewSummary ? splitListText(encounter.interviewSummary) : []),
-      ...(signals?.chiefComplaint ? [signals.chiefComplaint] : [])
-    ]).slice(0, 8);
-
-    let aiQuestions = [];
     try {
-      const cdssResponse = await generateCdssPrecheck({
-        patientId: patient.id,
-        encounterId: `encounter-${appointmentId}`,
-        chiefComplaint: signals.chiefComplaint || encounter?.apciDraft?.soap?.chiefComplaint || appointment.visitType,
-        transcript: latestSymptoms.join(". ")
-      });
-      aiQuestions = mapCdssQuestionsToUi(cdssResponse?.questions, appointmentId);
-    } catch (error) {
-      console.warn("[NIRA] CDSS pre-check regeneration failed, using local generation.", error);
-      aiQuestions = await generatePrecheckQuestions(`encounter-${appointmentId}`, {
-        chiefComplaint: signals.chiefComplaint || encounter?.apciDraft?.soap?.chiefComplaint || appointment.visitType,
-        patientName: patient.fullName,
-        patientAge: patient.age,
-        patientGender: patient.gender,
-        patientNotes: patient.notes,
-        doctorSpecialty: doctor.specialty,
-        appointmentType: appointment.visitType,
-        existingConditions: signals.knownConditions || [],
-        latestSymptoms,
-        currentMedications: signals.knownMedications || []
-      });
-    }
+      const questionnaire = getPrecheckQuestionnaireByAppointment(nextSnapshot, appointmentId);
+      const dbSync = getDbSyncRecord(nextSnapshot, appointmentId);
+      const notification = listCollection(nextSnapshot.notifications)
+        .filter((item) => item.type === "precheck_sent" && resolveNotificationAppointmentId(item) === appointmentId)
+        .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0] || null;
 
-    return updateState((state) => {
-      const currentAppointment = state.appointments.byId[appointmentId];
-      if (!currentAppointment) {
-        throw new Error("Appointment not found.");
-      }
-
-      const questionnaire = createPrecheckQuestionnaire(state, currentAppointment, {
-        status: "sent_to_patient",
-        sendToPatient: true,
-        forceRegenerate: true
-      });
-
-      if (questionnaire && Array.isArray(aiQuestions) && aiQuestions.length > 0) {
-        upsertPrecheckQuestionnaireEntity(state, {
-          ...questionnaire,
-          status: "sent_to_patient",
-          aiQuestions,
-          editedQuestions: [],
-          patientResponses: {},
-          patientCompletedAt: null,
-          doctorConfirmedAt: null,
-          sentToPatientAt: new Date().toISOString(),
-          precheckSummary: null,
-          updatedAt: new Date().toISOString()
-        });
-      }
-
-      const latestQuestionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
-
-      state.encounters.byId[`encounter-${appointmentId}`] = {
-        ...state.encounters.byId[`encounter-${appointmentId}`],
-        precheckQuestionnaireId: latestQuestionnaire?.id || questionnaire?.id || null,
-        precheckStatus: latestQuestionnaire?.status || questionnaire?.status || "sent_to_patient"
-      };
-
-      if (latestQuestionnaire) {
-        upsertNotificationEntity(
-          state,
-          createDemoNotification({
-            userId: currentAppointment.patientId,
-            type: "precheck_sent",
-            title: "Updated pre-check questions",
-            message: "AI has updated your pre-check questions. Please complete them before appointment.",
-            encounterId: `encounter-${appointmentId}`,
-            questionnaireId: latestQuestionnaire.id
+      if (questionnaire && dbSync?.encounterId) {
+        const dbQuestionnaire = await upsertDbPrecheckQuestionnaire(
+          buildDbPrecheckSyncPayload(nextSnapshot, appointmentId, questionnaire, {
+            status: "sent_to_patient",
+            metadata: {
+              source: "precheck_regenerated"
+            }
           })
         );
+
+        if (notification) {
+          await createDbNotification(
+            buildDbNotificationSyncPayload(nextSnapshot, notification, {
+              encounterId: dbSync.encounterId,
+              questionnaireId: dbQuestionnaire.id
+            })
+          );
+        }
+
+        nextSnapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+
+          upsertDbSyncEntity(state, {
+            ...existing,
+            precheckQuestionnaireId: dbQuestionnaire.id,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Regenerated pre-check saved locally; DB sync skipped.", error);
+      nextSnapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return nextSnapshot;
+  },
+
+  async ensurePrecheckQuestionnaire(appointmentId, options = {}) {
+    await wait(60);
+    return ensureAiPrecheckQuestionnaire(appointmentId, {
+      forceRegenerate: options?.forceRegenerate === true,
+      status: options?.status || "sent_to_patient",
+      notifyPatient: false
+    });
+  },
+
+  async startAdaptivePrecheckSession(appointmentId) {
+    await wait(80);
+    let snapshot = await ensureAiPrecheckQuestionnaire(appointmentId, {
+      status: "sent_to_patient",
+      notifyPatient: false
+    });
+
+    let questionnaire = getPrecheckQuestionnaireByAppointment(snapshot, appointmentId);
+    if (!questionnaire) {
+      throw new Error("Pre-check questionnaire not found.");
+    }
+
+    if (!shouldUseAdaptivePrecheck(questionnaire)) {
+      return snapshot;
+    }
+
+    if (getCurrentAdaptivePrecheckQuestion(questionnaire) || questionnaire?.metadata?.adaptiveComplete) {
+      return snapshot;
+    }
+
+    const appointment = snapshot.appointments.byId[appointmentId];
+    const patient = snapshot.patients.byId[appointment.patientId] || {};
+    const doctor = snapshot.doctors.byId[appointment.doctorId] || {};
+    const turnInput = buildAdaptivePrecheckTurnInput(snapshot, appointment, patient, doctor, questionnaire);
+    const turn = await generateAdaptivePrecheckTurn(
+      turnInput.encounterId,
+      turnInput.appointmentContext,
+      turnInput.sessionState
+    );
+
+    if (turn.isComplete) {
+      return updateState((state) => {
+        const currentQuestionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
+        if (!currentQuestionnaire) {
+          throw new Error("Pre-check questionnaire not found.");
+        }
+
+        upsertPrecheckQuestionnaireEntity(state, {
+          ...currentQuestionnaire,
+          metadata: buildDiseaseSpecificPrecheckMetadata(currentQuestionnaire.aiQuestions || [], currentQuestionnaire.metadata, {
+            targetQuestionCount: turn.targetQuestionCount,
+            chiefComplaint: turnInput.appointmentContext.chiefComplaint,
+            adaptiveComplete: true
+          }),
+          updatedAt: new Date().toISOString()
+        });
+        return state;
+      });
+    }
+
+    snapshot = updateState((state) => {
+      const currentQuestionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
+      if (!currentQuestionnaire) {
+        throw new Error("Pre-check questionnaire not found.");
       }
 
+      const nextQuestions = appendAdaptivePrecheckQuestion(currentQuestionnaire, appointmentId, turn.question);
+      upsertPrecheckQuestionnaireEntity(state, {
+        ...currentQuestionnaire,
+        aiQuestions: nextQuestions,
+        metadata: buildDiseaseSpecificPrecheckMetadata(nextQuestions, currentQuestionnaire.metadata, {
+          targetQuestionCount: turn.targetQuestionCount,
+          chiefComplaint: turnInput.appointmentContext.chiefComplaint,
+          adaptiveComplete: false
+        }),
+        updatedAt: new Date().toISOString()
+      });
       return state;
     });
+
+    return snapshot;
+  },
+
+  async answerAdaptivePrecheckQuestion(appointmentId, payload = {}) {
+    await wait(80);
+    const questionId = String(payload?.questionId || "").trim();
+    const answer = String(payload?.answer || "").trim();
+    const rawAnswer = String(payload?.rawAnswer || payload?.answer || "").trim();
+
+    if (!questionId || !answer) {
+      throw new Error("Missing adaptive pre-check answer.");
+    }
+
+    let snapshot = updateState((state) => {
+      const questionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
+      if (!questionnaire) {
+        throw new Error("Pre-check questionnaire not found.");
+      }
+      const rawPatientResponses = {
+        ...normalizeRawPrecheckResponsesMap(questionnaire?.metadata?.rawPatientResponses),
+        [questionId]: rawAnswer || answer
+      };
+
+      upsertPrecheckQuestionnaireEntity(state, {
+        ...questionnaire,
+        patientResponses: {
+          ...(questionnaire.patientResponses || {}),
+          [questionId]: answer
+        },
+        metadata: {
+          ...buildDiseaseSpecificPrecheckMetadata(questionnaire.aiQuestions || [], questionnaire.metadata, {
+            targetQuestionCount: getAdaptivePrecheckTargetQuestionCount(questionnaire),
+            chiefComplaint: questionnaire?.metadata?.chiefComplaint,
+            adaptiveComplete: false
+          }),
+          rawPatientResponses
+        },
+        updatedAt: new Date().toISOString()
+      });
+      return state;
+    });
+
+    let questionnaire = getPrecheckQuestionnaireByAppointment(snapshot, appointmentId);
+    if (!questionnaire || !shouldUseAdaptivePrecheck(questionnaire)) {
+      return snapshot;
+    }
+
+    if (getCurrentAdaptivePrecheckQuestion(questionnaire)) {
+      return snapshot;
+    }
+
+    const answeredCount = countAnsweredPrecheckResponses(questionnaire);
+    const targetQuestionCount = getAdaptivePrecheckTargetQuestionCount(questionnaire);
+    const reachedTarget =
+      (answeredCount >= targetQuestionCount && answeredCount >= DISEASE_SPECIFIC_PRECHECK_MIN_QUESTIONS)
+      || answeredCount >= DISEASE_SPECIFIC_PRECHECK_MAX_QUESTIONS;
+
+    if (reachedTarget) {
+      return updateState((state) => {
+        const currentQuestionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
+        if (!currentQuestionnaire) {
+          throw new Error("Pre-check questionnaire not found.");
+        }
+
+        upsertPrecheckQuestionnaireEntity(state, {
+          ...currentQuestionnaire,
+          metadata: buildDiseaseSpecificPrecheckMetadata(currentQuestionnaire.aiQuestions || [], currentQuestionnaire.metadata, {
+            targetQuestionCount,
+            chiefComplaint: currentQuestionnaire?.metadata?.chiefComplaint,
+            adaptiveComplete: true
+          }),
+          updatedAt: new Date().toISOString()
+        });
+        return state;
+      });
+    }
+
+    const appointment = snapshot.appointments.byId[appointmentId];
+    const patient = snapshot.patients.byId[appointment.patientId] || {};
+    const doctor = snapshot.doctors.byId[appointment.doctorId] || {};
+    const turnInput = buildAdaptivePrecheckTurnInput(snapshot, appointment, patient, doctor, questionnaire);
+    const turn = await generateAdaptivePrecheckTurn(
+      turnInput.encounterId,
+      turnInput.appointmentContext,
+      turnInput.sessionState
+    );
+
+    if (turn.isComplete) {
+      return updateState((state) => {
+        const currentQuestionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
+        if (!currentQuestionnaire) {
+          throw new Error("Pre-check questionnaire not found.");
+        }
+
+        upsertPrecheckQuestionnaireEntity(state, {
+          ...currentQuestionnaire,
+          metadata: buildDiseaseSpecificPrecheckMetadata(currentQuestionnaire.aiQuestions || [], currentQuestionnaire.metadata, {
+            targetQuestionCount: turn.targetQuestionCount,
+            chiefComplaint: turnInput.appointmentContext.chiefComplaint,
+            adaptiveComplete: true
+          }),
+          updatedAt: new Date().toISOString()
+        });
+        return state;
+      });
+    }
+
+    snapshot = updateState((state) => {
+      const currentQuestionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
+      if (!currentQuestionnaire) {
+        throw new Error("Pre-check questionnaire not found.");
+      }
+
+      const nextQuestions = appendAdaptivePrecheckQuestion(currentQuestionnaire, appointmentId, turn.question);
+      upsertPrecheckQuestionnaireEntity(state, {
+        ...currentQuestionnaire,
+        aiQuestions: nextQuestions,
+        metadata: buildDiseaseSpecificPrecheckMetadata(nextQuestions, currentQuestionnaire.metadata, {
+          targetQuestionCount: turn.targetQuestionCount,
+          chiefComplaint: turnInput.appointmentContext.chiefComplaint,
+          adaptiveComplete: false
+        }),
+        updatedAt: new Date().toISOString()
+      });
+      return state;
+    });
+
+    return snapshot;
   },
 
   async sendPrecheckToPatient(appointmentId) {
     await wait(120);
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const appointment = state.appointments.byId[appointmentId];
       if (!appointment) {
         throw new Error("Appointment not found.");
       }
 
       const questionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId) || createPrecheckQuestionnaire(state, appointment);
+      const isAdaptivePrecheck = questionnaire?.metadata?.generationMode === DISEASE_SPECIFIC_PRECHECK_MODE;
       const nextQuestions = questionnaire.editedQuestions?.length ? questionnaire.editedQuestions : questionnaire.aiQuestions;
+      if (!nextQuestions.length && !isAdaptivePrecheck) {
+        throw new Error("No pre-check questions available to send.");
+      }
       const updated = {
         ...questionnaire,
-        editedQuestions: nextQuestions,
+        editedQuestions: isAdaptivePrecheck ? (questionnaire.editedQuestions || []) : nextQuestions,
         status: "sent_to_patient",
         doctorConfirmedAt: new Date().toISOString(),
         sentToPatientAt: new Date().toISOString(),
@@ -2696,6 +3703,77 @@ export const demoStore = {
 
       return state;
     });
+
+    try {
+      const questionnaire = getPrecheckQuestionnaireByAppointment(snapshot, appointmentId);
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      const notification = listCollection(snapshot.notifications)
+        .filter((item) => item.type === "precheck_sent" && resolveNotificationAppointmentId(item) === appointmentId)
+        .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0] || null;
+
+      if (questionnaire && dbSync?.encounterId) {
+        const dbQuestionnaire = await upsertDbPrecheckQuestionnaire(
+          buildDbPrecheckSyncPayload(snapshot, appointmentId, questionnaire, {
+            status: "sent_to_patient",
+            metadata: {
+              source: "precheck_sent"
+            }
+          })
+        );
+
+        if (notification) {
+          await createDbNotification(
+            buildDbNotificationSyncPayload(snapshot, notification, {
+              encounterId: dbSync.encounterId,
+              questionnaireId: dbQuestionnaire.id
+            })
+          );
+        }
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+
+          upsertDbSyncEntity(state, {
+            ...existing,
+            precheckQuestionnaireId: dbQuestionnaire.id,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Pre-check sent locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async submitPrecheckResponses(appointmentId, patientResponses) {
@@ -2706,45 +3784,108 @@ export const demoStore = {
         throw new Error("Appointment not found.");
       }
 
+      const patient = state.patients.byId[appointment.patientId];
       const questionnaire = getPrecheckQuestionnaireByAppointment(state, appointmentId);
       if (!questionnaire) {
         throw new Error("Pre-check questionnaire not found.");
       }
 
+      const submissionPayload = normalizePrecheckSubmissionPayload(patientResponses);
+      const responseMap = submissionPayload.patientResponses;
+      const rawPatientResponses = {
+        ...normalizeRawPrecheckResponsesMap(questionnaire?.metadata?.rawPatientResponses),
+        ...normalizeRawPrecheckResponsesMap(submissionPayload.metadata?.rawPatientResponses)
+      };
+      const precheckMetadata = buildPrecheckSessionMetadata(state, appointment, {
+        ...(submissionPayload.metadata || {}),
+        ...(Object.keys(rawPatientResponses).length ? { rawPatientResponses } : {})
+      });
       const questions = questionnaire.editedQuestions?.length ? questionnaire.editedQuestions : questionnaire.aiQuestions;
       const precheckSummary = questions.reduce((acc, question) => {
-        acc[question.question] = patientResponses?.[question.id] || "Not answered";
+        acc[question.question] = responseMap?.[question.id] || "Not answered";
         return acc;
       }, {});
 
       const updatedQuestionnaire = {
         ...questionnaire,
-        patientResponses,
+        patientResponses: responseMap,
         patientCompletedAt: new Date().toISOString(),
         status: "completed",
         precheckSummary,
+        metadata: {
+          ...(questionnaire?.metadata || {}),
+          ...precheckMetadata
+        },
         updatedAt: new Date().toISOString()
       };
 
       upsertPrecheckQuestionnaireEntity(state, updatedQuestionnaire);
 
-      const encounter = state.encounters.byId[`encounter-${appointmentId}`];
+      const encounter = state.encounters.byId[`encounter-${appointmentId}`] || null;
+      const baseDraft = encounter?.apciDraft || emptyEncounterDraft("Pre-check completed");
+      const derivedAnswers = deriveAnswersFromPrecheckQuestionnaire(updatedQuestionnaire);
+      const interview = buildInterviewFromPrecheckQuestionnaire(
+        appointmentId,
+        updatedQuestionnaire,
+        derivedAnswers.language || "en"
+      );
+      const generatedDraft = buildDraftFromAnswers(
+        appointment,
+        patient,
+        derivedAnswers,
+        baseDraft?.id || `draft-${appointmentId}`
+      );
+      const subjectiveSummary = Object.entries(precheckSummary)
+        .map(([question, answer]) => `${question}: ${answer}`)
+        .join("\n");
+      const nextDraft = {
+        ...generatedDraft,
+        id: generatedDraft.id || baseDraft.id || `draft-${appointmentId}`,
+        appointmentId,
+        soap: {
+          ...(baseDraft.soap || {}),
+          ...(generatedDraft.soap || {}),
+          subjective: subjectiveSummary || generatedDraft.soap?.subjective || baseDraft.soap?.subjective || ""
+        },
+        vitals: {
+          ...(baseDraft.vitals || {}),
+          ...(generatedDraft.vitals || {})
+        },
+        diagnoses: generatedDraft.diagnoses?.length ? generatedDraft.diagnoses : baseDraft.diagnoses || [],
+        medicationSuggestions: generatedDraft.medicationSuggestions?.length
+          ? generatedDraft.medicationSuggestions
+          : baseDraft.medicationSuggestions || [],
+        alerts: dedupeList([...(generatedDraft.alerts || []), ...(baseDraft.alerts || [])]),
+        confidenceMap: {
+          ...(baseDraft.confidenceMap || {}),
+          ...(generatedDraft.confidenceMap || {})
+        },
+        differentials: dedupeList([...(generatedDraft.differentials || []), ...(baseDraft.differentials || [])])
+      };
+
+      upsertInterview(state, interview);
       state.encounters.byId[`encounter-${appointmentId}`] = {
-        ...encounter,
+        ...(encounter || {}),
+        id: `encounter-${appointmentId}`,
+        appointmentId,
+        doctorId: appointment.doctorId,
+        patientId: appointment.patientId,
         status: "ai_ready",
+        interviewId: interview.id,
         precheckQuestionnaireId: updatedQuestionnaire.id,
         precheckStatus: "completed",
         precheckSummary,
-        apciDraft: {
-          ...(encounter?.apciDraft || emptyEncounterDraft("Pre-check completed")),
-          soap: {
-            ...(encounter?.apciDraft?.soap || {}),
-            subjective: Object.entries(precheckSummary)
-              .map(([question, answer]) => `${question}: ${answer}`)
-              .join("\n")
-          }
-        }
+        interviewSummary: subjectiveSummary,
+        apciDraft: nextDraft,
+        alerts: nextDraft.alerts,
+        confidenceMap: nextDraft.confidenceMap,
+        metadata: {
+          ...(encounter?.metadata || {}),
+          ...precheckMetadata
+        },
+        updatedAt: new Date().toISOString()
       };
+      state.ui.lastViewedAppointmentId = appointmentId;
       return state;
     });
 
@@ -2765,6 +3906,198 @@ export const demoStore = {
       );
       return state;
     });
+
+    try {
+      const appointment = snapshot.appointments.byId[appointmentId];
+      const patient = snapshot.patients.byId[appointment.patientId];
+      const doctor = snapshot.doctors.byId[appointment.doctorId];
+      const questionnaire = getPrecheckQuestionnaireByAppointment(snapshot, appointmentId);
+      const answers = deriveAnswersFromPrecheckQuestionnaire(questionnaire);
+      const emrSync = getEmrSyncRecord(snapshot, appointmentId);
+      const emrResponse = await syncInterviewToGunaEmr({ appointment, patient, doctor, answers, emrSync });
+
+      snapshot = updateState((state) => {
+        const existing = state.emrSync.byId[`emr-${appointmentId}`] || {
+          id: `emr-${appointmentId}`,
+          appointmentId,
+          localPatientId: patient.id,
+          localDoctorId: doctor.id,
+          patientId: null,
+          encounterId: null,
+          queueToken: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+
+        upsertEmrSyncEntity(state, {
+          ...existing,
+          patientId: emrResponse?.patientId || existing.patientId,
+          encounterId: emrResponse?.encounterId || existing.encounterId,
+          queueToken: emrResponse?.queueToken ?? existing.queueToken,
+          interviewSyncedAt: new Date().toISOString(),
+          lastError: null
+        });
+        return state;
+      });
+    } catch (error) {
+      console.warn("[NIRA] Pre-check saved locally; EMR sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.emrSync.byId[`emr-${appointmentId}`] || {
+          id: `emr-${appointmentId}`,
+          appointmentId,
+          localPatientId: state.appointments.byId[appointmentId]?.patientId || null,
+          localDoctorId: state.appointments.byId[appointmentId]?.doctorId || null,
+          patientId: null,
+          encounterId: null,
+          queueToken: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertEmrSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    try {
+      const appointment = snapshot.appointments.byId[appointmentId];
+      const questionnaire = getPrecheckQuestionnaireByAppointment(snapshot, appointmentId);
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      const notification = listCollection(snapshot.notifications)
+        .filter((item) => item.type === "precheck_completed" && resolveNotificationAppointmentId(item) === appointmentId)
+        .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0] || null;
+      const interviewPayload = buildDbInterviewSyncPayload(snapshot, appointmentId, {
+        status: "completed",
+        completedAt: new Date().toISOString(),
+        metadata: {
+          source: "patient_precheck"
+        }
+      });
+
+      if (dbSync?.interviewId) {
+        await updateInterview(dbSync.interviewId, interviewPayload);
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: null,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+          upsertDbSyncEntity(state, {
+            ...existing,
+            interviewSyncedAt: new Date().toISOString(),
+            lastError: null
+          });
+          return state;
+        });
+      } else if (dbSync?.encounterId) {
+        const dbInterview = await createInterview(interviewPayload);
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+          upsertDbSyncEntity(state, {
+            ...existing,
+            interviewId: dbInterview.id,
+            interviewSyncedAt: new Date().toISOString(),
+            lastError: null
+          });
+          return state;
+        });
+      }
+
+      if (questionnaire && dbSync?.encounterId) {
+        const dbQuestionnaire = await upsertDbPrecheckQuestionnaire(
+          buildDbPrecheckSyncPayload(snapshot, appointmentId, questionnaire, {
+            status: "completed",
+            metadata: {
+              source: "patient_precheck"
+            }
+          })
+        );
+
+        if (notification) {
+          await createDbNotification(
+            buildDbNotificationSyncPayload(snapshot, notification, {
+              encounterId: dbSync.encounterId,
+              questionnaireId: dbQuestionnaire.id
+            })
+          );
+        }
+
+        await upsertEncounterSnapshot(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            status: "ai_ready",
+            aiPrechart: snapshot.encounters.byId[`encounter-${appointmentId}`]?.apciDraft || null,
+            metadata: {
+              source: "patient_precheck"
+            }
+          })
+        );
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+          upsertDbSyncEntity(state, {
+            ...existing,
+            precheckQuestionnaireId: dbQuestionnaire.id,
+            interviewSyncedAt: new Date().toISOString(),
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Pre-check stored locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
 
     return snapshot;
   },
@@ -2788,7 +4121,7 @@ export const demoStore = {
 
   async saveDoctorReview(appointmentId, payload) {
     await wait();
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const encounter = state.encounters.byId[`encounter-${appointmentId}`];
       if (!encounter) {
         throw new Error("Encounter not found.");
@@ -2834,11 +4167,90 @@ export const demoStore = {
       createOrUpdateLabReport(state, appointmentId, payload.labReport || {}, "draft");
       return state;
     });
+
+    try {
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      if (dbSync?.encounterId) {
+        await upsertEncounterSnapshot(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            status: "in_consult",
+            aiPrechart: payload.draft,
+            doctorNotes: {
+              note: payload.note || "",
+              editedFields: payload.editedFields || [],
+              reviewedAt: new Date().toISOString(),
+              approved: false
+            },
+            metadata: {
+              source: "doctor_review_draft"
+            }
+          })
+        );
+
+        const labReport = listCollection(snapshot.labReports)
+          .filter((item) => item.appointmentId === appointmentId)
+          .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0] || null;
+
+        const dbLabReport = labReport
+          ? await upsertDbLabReport(
+            buildDbLabReportSyncPayload(snapshot, appointmentId, labReport, {
+              status: "draft",
+              metadata: {
+                source: "doctor_review_draft"
+              }
+            })
+          )
+          : null;
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+
+          upsertDbSyncEntity(state, {
+            ...existing,
+            labReportId: dbLabReport?.id || existing.labReportId || null,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Doctor review saved locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async upsertLabReport(appointmentId, payload) {
     await wait();
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const appointment = state.appointments.byId[appointmentId];
       if (!appointment) {
         throw new Error("Appointment not found.");
@@ -2847,11 +4259,71 @@ export const demoStore = {
       createOrUpdateLabReport(state, appointmentId, payload || {}, payload?.status || "draft");
       return state;
     });
+
+    try {
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      const labReport = listCollection(snapshot.labReports)
+        .filter((item) => item.appointmentId === appointmentId)
+        .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0] || null;
+
+      if (dbSync?.encounterId && labReport) {
+        const dbLabReport = await upsertDbLabReport(
+          buildDbLabReportSyncPayload(snapshot, appointmentId, labReport, {
+            status: labReport.status || payload?.status || "draft",
+            metadata: {
+              source: "manual_lab_report_update"
+            }
+          })
+        );
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+          upsertDbSyncEntity(state, {
+            ...existing,
+            labReportId: dbLabReport.id,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Lab report saved locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async saveNurseVitals(appointmentId, payload) {
     await wait(90);
-    return updateState((state) => {
+    let snapshot = updateState((state) => {
       const appointment = state.appointments.byId[appointmentId];
       if (!appointment) {
         throw new Error("Appointment not found.");
@@ -2894,6 +4366,129 @@ export const demoStore = {
 
       return state;
     });
+
+    try {
+      const appointment = snapshot.appointments.byId[appointmentId];
+      const patient = snapshot.patients.byId[appointment.patientId];
+      const emrSync = getEmrSyncRecord(snapshot, appointmentId);
+      const vitals = snapshot.encounters.byId[`encounter-${appointmentId}`]?.apciDraft?.vitals || {};
+      const emrResponse = await syncNurseVitalsToGunaEmr({
+        appointment,
+        patient,
+        vitals,
+        emrSync
+      });
+
+      snapshot = updateState((state) => {
+        const existing = state.emrSync.byId[`emr-${appointmentId}`] || {
+          id: `emr-${appointmentId}`,
+          appointmentId,
+          localPatientId: patient.id,
+          localDoctorId: appointment.doctorId,
+          patientId: null,
+          encounterId: null,
+          queueToken: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          vitalsSyncedAt: null,
+          lastError: null
+        };
+
+        upsertEmrSyncEntity(state, {
+          ...existing,
+          patientId: emrResponse?.patientId || existing.patientId,
+          encounterId: emrResponse?.encounterId || existing.encounterId,
+          vitalsSyncedAt: new Date().toISOString(),
+          lastError: null
+        });
+        return state;
+      });
+    } catch (error) {
+      console.warn("[NIRA] Nurse vitals saved locally; EMR sync skipped.", error);
+      snapshot = updateState((state) => {
+        const appointment = state.appointments.byId[appointmentId];
+        const existing = state.emrSync.byId[`emr-${appointmentId}`] || {
+          id: `emr-${appointmentId}`,
+          appointmentId,
+          localPatientId: appointment?.patientId || null,
+          localDoctorId: appointment?.doctorId || null,
+          patientId: null,
+          encounterId: null,
+          queueToken: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          vitalsSyncedAt: null,
+          lastError: null
+        };
+        upsertEmrSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    try {
+      const dbSync = getDbSyncRecord(snapshot, appointmentId);
+      if (dbSync?.encounterId) {
+        await upsertEncounterSnapshot(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            status: snapshot.encounters.byId[`encounter-${appointmentId}`]?.status || "ai_ready",
+            vitals: snapshot.encounters.byId[`encounter-${appointmentId}`]?.apciDraft?.vitals || null,
+            checkInTime:
+              snapshot.appointments.byId[appointmentId]?.bookingStatus === "checked_in"
+                ? new Date().toISOString()
+                : null,
+            metadata: {
+              source: "nurse_vitals"
+            }
+          })
+        );
+
+        snapshot = updateState((state) => {
+          const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+            id: `db-${appointmentId}`,
+            appointmentId,
+            encounterId: dbSync.encounterId,
+            interviewId: null,
+            prescriptionId: null,
+            bookingSyncedAt: null,
+            interviewSyncedAt: null,
+            approvalSyncedAt: null,
+            lastError: null
+          };
+          upsertDbSyncEntity(state, {
+            ...existing,
+            lastError: null
+          });
+          return state;
+        });
+      }
+    } catch (error) {
+      console.warn("[NIRA] Nurse vitals saved locally; DB sync skipped.", error);
+      snapshot = updateState((state) => {
+        const existing = state.dbSync.byId[`db-${appointmentId}`] || {
+          id: `db-${appointmentId}`,
+          appointmentId,
+          encounterId: null,
+          interviewId: null,
+          prescriptionId: null,
+          bookingSyncedAt: null,
+          interviewSyncedAt: null,
+          approvalSyncedAt: null,
+          lastError: null
+        };
+        upsertDbSyncEntity(state, {
+          ...existing,
+          lastError: String(error?.message || error)
+        });
+        return state;
+      });
+    }
+
+    return snapshot;
   },
 
   async approveEncounter(appointmentId, payload) {
@@ -3058,20 +4653,102 @@ export const demoStore = {
       const dbSync = getDbSyncRecord(snapshot, appointmentId);
 
       if (dbSync?.encounterId) {
+        const encounter = snapshot.encounters.byId[`encounter-${appointmentId}`];
+        const prescription = encounter?.prescriptionId
+          ? snapshot.prescriptions.byId[encounter.prescriptionId] || null
+          : null;
+        const labReport = listCollection(snapshot.labReports)
+          .filter((item) => item.appointmentId === appointmentId)
+          .sort((left, right) => new Date(right.updatedAt) - new Date(left.updatedAt))[0] || null;
+        const testOrder = snapshot.testOrders.byId[`tests-${appointmentId}`] || null;
+        const rxNotification = listCollection(snapshot.notifications)
+          .filter((item) => item.type === "prescription_approved" && resolveNotificationAppointmentId(item) === appointmentId)
+          .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0] || null;
+        const testsNotification = listCollection(snapshot.notifications)
+          .filter((item) => item.type === "tests_ordered" && resolveNotificationAppointmentId(item) === appointmentId)
+          .sort((left, right) => new Date(right.createdAt) - new Date(left.createdAt))[0] || null;
+
+        await upsertEncounterSnapshot(
+          buildDbEncounterSyncPayload(snapshot, appointmentId, {
+            status: "approved",
+            completedTime: encounter?.approvedAt || new Date().toISOString(),
+            aiPrechart: payload.draft,
+            doctorNotes: {
+              note: payload.note || "",
+              editedFields: payload.editedFields || [],
+              reviewedAt: encounter?.doctorReview?.reviewedAt || new Date().toISOString(),
+              approved: true,
+              followUpNote: payload.followUpNote || ""
+            },
+            metadata: {
+              source: "doctor_approval"
+            }
+          })
+        );
+
         const dbPrescription = await createPrescription({
+          prescriptionId: prescription?.id || `rx-${appointmentId}`,
+          appointmentId,
           encounterId: dbSync.encounterId,
           patientId: appointment.patientId,
           doctorId: appointment.doctorId,
           clinicId: doctor.clinic || "NIRA Pilot Clinic",
           medications: buildDbMedicationPayload(payload.draft),
           diagnosis: buildDbDiagnosisPayload(payload.draft),
-          notes: payload.note || payload.followUpNote || ""
+          notes: payload.note || payload.followUpNote || "",
+          status: "active",
+          approvedAt: new Date().toISOString(),
+          metadata: {
+            followUpNote: payload.followUpNote || "",
+            source: "doctor_approval"
+          }
         });
 
         try {
           await approvePrescription(dbPrescription.id, appointment.doctorId);
         } catch (approvalError) {
           console.warn("[NIRA] Prescription created in DB; approval workflow call skipped.", approvalError);
+        }
+
+        const dbLabReport = labReport
+          ? await upsertDbLabReport(
+            buildDbLabReportSyncPayload(snapshot, appointmentId, labReport, {
+              status: "final",
+              metadata: {
+                source: "doctor_approval"
+              }
+            })
+          )
+          : null;
+
+        const dbTestOrder = testOrder
+          ? await upsertDbTestOrder(
+            buildDbTestOrderSyncPayload(snapshot, appointmentId, testOrder, {
+              metadata: {
+                source: "doctor_approval"
+              }
+            })
+          )
+          : null;
+
+        if (rxNotification) {
+          await createDbNotification(
+            buildDbNotificationSyncPayload(snapshot, rxNotification, {
+              encounterId: dbSync.encounterId,
+              prescriptionId: dbPrescription.id
+            })
+          );
+        }
+
+        if (testsNotification && dbTestOrder) {
+          await createDbNotification(
+            buildDbNotificationSyncPayload(snapshot, testsNotification, {
+              encounterId: dbSync.encounterId,
+              metadata: {
+                remoteTestOrderId: dbTestOrder.id
+              }
+            })
+          );
         }
 
         snapshot = updateState((state) => {
@@ -3089,6 +4766,8 @@ export const demoStore = {
           upsertDbSyncEntity(state, {
             ...existing,
             prescriptionId: dbPrescription.id,
+            labReportId: dbLabReport?.id || existing.labReportId || null,
+            testOrderId: dbTestOrder?.id || existing.testOrderId || null,
             approvalSyncedAt: new Date().toISOString(),
             lastError: null
           });

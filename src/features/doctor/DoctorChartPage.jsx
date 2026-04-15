@@ -29,8 +29,8 @@ const INVESTIGATION_SUGGESTIONS = [
 
 const SECTION_META = [
   { key: "snapshot", title: "1. Patient snapshot", source: "ABHA / ABDM", action: "Verify, edit if needed" },
-  { key: "chiefComplaint", title: "2. Chief complaint", source: "AI from interview", action: "Validate or edit" },
-  { key: "history", title: "3. History", source: "AI from interview", action: "Validate or edit" },
+  { key: "chiefComplaint", title: "2. Chief complaint", source: "AI from patient intake", action: "Validate or edit" },
+  { key: "history", title: "3. History", source: "AI from patient intake", action: "Validate or edit" },
   { key: "vitals", title: "4. Vitals", source: "Device sync / nurse", action: "Edit inline if changed" },
   { key: "exam", title: "5. Examination findings", source: "Doctor", action: "Doctor types findings" },
   { key: "diagnosis", title: "6. Diagnosis", source: "AI suggested", action: "Confirm or change" },
@@ -408,6 +408,7 @@ export function DoctorChartPage() {
   };
 
   const sectionBadge = (key) => SECTION_META.find((s) => s.key === key);
+  const chatbotMetadata = bundle.encounter?.chatbotMetadata || null;
 
   return (
     <AppShell
@@ -503,6 +504,107 @@ export function DoctorChartPage() {
               <Input value={form.snapshot.regularMeds} onChange={(e) => update(["snapshot", "regularMeds"], e.target.value)} placeholder="Regular meds" />
             </div>
           </Card>
+
+          {bundle.interview ? (
+            <Card>
+              <CardHeader
+                eyebrow="Patient intake"
+                title="Saved pre-check / chatbot intake"
+                description="Chatbot and doctor-sent pre-check answers are written into the EMR so you can review them before charting."
+                actions={
+                  <Badge tone={bundle.interview.completionStatus === "complete" ? "success" : "warning"}>
+                    {bundle.interview.completionStatus === "complete" ? "Saved" : "In progress"}
+                  </Badge>
+                }
+              />
+              <div className="grid gap-3 lg:grid-cols-2">
+                <div className="rounded-2xl border border-line bg-surface-2 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted">Conversation</div>
+                  <div className="mt-3 space-y-2">
+                    {(bundle.interview.transcript || []).length ? (
+                      bundle.interview.transcript.map((entry, index) => (
+                        <div
+                          key={`${entry.role}-${index}`}
+                          className={cn(
+                            "rounded-xl border px-3 py-2 text-sm leading-6",
+                            entry.role === "ai"
+                              ? "border-cyan-100 bg-white text-ink"
+                              : "border-brand-midnight/10 bg-brand-midnight text-white"
+                          )}
+                        >
+                          <div
+                            className={cn(
+                              "text-[10px] font-bold uppercase tracking-wide",
+                              entry.role === "ai" ? "text-brand-tide" : "text-white/70"
+                            )}
+                          >
+                            {entry.role === "ai" ? "Chatbot" : "Patient"}
+                          </div>
+                          <div className="mt-1">{entry.text}</div>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-line bg-white px-3 py-4 text-xs text-muted">
+                        No transcript captured yet.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-line bg-surface-2 p-3">
+                  <div className="text-xs font-semibold uppercase tracking-wide text-muted">Extracted intake answers</div>
+                  {chatbotMetadata ? (
+                    <div className="mt-3 rounded-2xl border border-cyan-100 bg-cyan-50/70 p-3 text-sm text-ink">
+                      <div className="text-xs font-semibold uppercase tracking-wide text-brand-tide">Clinical snapshot</div>
+                      {chatbotMetadata.clinicalSnapshot ? (
+                        <div className="mt-2 leading-6">{chatbotMetadata.clinicalSnapshot}</div>
+                      ) : (
+                        <div className="mt-2 text-xs text-muted">No AI intake summary captured yet.</div>
+                      )}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {chatbotMetadata.detectedFocus ? <Badge tone="info">Detected focus: {chatbotMetadata.detectedFocus}</Badge> : null}
+                        {chatbotMetadata.triageLevel ? <Badge tone="neutral">Triage {chatbotMetadata.triageLevel}</Badge> : null}
+                        {chatbotMetadata.escalationBand ? (
+                          <Badge
+                            tone={
+                              chatbotMetadata.escalationBand === "red"
+                                ? "danger"
+                                : chatbotMetadata.escalationBand === "yellow"
+                                  ? "warning"
+                                  : "success"
+                            }
+                          >
+                            Escalation {chatbotMetadata.escalationBand.toUpperCase()}
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="mt-3 space-y-2">
+                    {(bundle.interview.extractedFindings || []).length ? (
+                      bundle.interview.extractedFindings.map((finding) => (
+                        <div key={finding} className="rounded-xl bg-white px-3 py-2 text-sm text-ink shadow-sm ring-1 ring-black/[0.03]">
+                          {finding}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="rounded-xl border border-dashed border-line bg-white px-3 py-4 text-xs text-muted">
+                        No answers extracted yet.
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                    <div className="rounded-xl border border-line bg-white px-3 py-2 text-xs text-muted">
+                      EMR status: <span className="font-semibold text-ink">{bundle.emrSync?.interviewSyncedAt ? "Synced" : "Pending"}</span>
+                    </div>
+                    <div className="rounded-xl border border-line bg-white px-3 py-2 text-xs text-muted">
+                      Queue token: <span className="font-semibold text-ink">{bundle.emrSync?.queueToken ?? "--"}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          ) : null}
 
           <Card>
             <CardHeader
